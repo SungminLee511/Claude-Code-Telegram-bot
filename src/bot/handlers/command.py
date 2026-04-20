@@ -12,7 +12,12 @@ from telegram.ext import ContextTypes
 
 from ...claude.facade import ClaudeIntegration
 from ...config.settings import Settings
-from ...projects import PrivateTopicsUnavailableError, load_project_registry
+# Projects module removed - stub
+class PrivateTopicsUnavailableError(Exception):
+    pass
+
+def load_project_registry(*args, **kwargs):
+    return None
 from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
 from ...storage.models import SessionModel

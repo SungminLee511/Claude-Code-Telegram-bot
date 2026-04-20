@@ -31,7 +31,9 @@ from telegram.ext import (
 
 from ..claude.sdk_integration import StreamUpdate
 from ..config.settings import Settings
-from ..projects import PrivateTopicsUnavailableError
+# Projects module removed - stub exception
+class PrivateTopicsUnavailableError(Exception):
+    pass
 from .utils.draft_streamer import DraftStreamer, generate_draft_id
 from .utils.html_format import escape_html
 from .utils.image_extractor import (

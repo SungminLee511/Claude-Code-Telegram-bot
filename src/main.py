@@ -19,13 +19,7 @@ from src.claude import (
 from src.claude.sdk_integration import ClaudeSDKManager
 from src.config.features import FeatureFlags
 from src.config.settings import Settings
-from src.events.bus import EventBus
-from src.events.handlers import AgentHandler
-from src.events.middleware import EventSecurityMiddleware
 from src.exceptions import ConfigurationError
-from src.notifications.service import NotificationService
-from src.projects import ProjectThreadManager, load_project_registry
-from src.scheduler.scheduler import JobScheduler
 from src.security.audit import AuditLogger, InMemoryAuditStorage
 from src.security.auth import (
     AuthenticationManager,
@@ -43,14 +37,12 @@ def setup_logging(debug: bool = False) -> None:
     """Configure structured logging."""
     level = logging.DEBUG if debug else logging.INFO
 
-    # Configure standard logging
     logging.basicConfig(
         level=level,
         format="%(message)s",
         stream=sys.stdout,
     )
 
-    # Configure structlog
     structlog.configure(
         processors=[
             structlog.stdlib.filter_by_level,
@@ -84,9 +76,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--version", action="version", version=f"Claude Code Telegram Bot {__version__}"
     )
-
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-
     parser.add_argument("--config-file", type=Path, help="Path to configuration file")
 
     return parser.parse_args()
@@ -106,21 +96,15 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     # Create security components
     providers = []
 
-    # Add whitelist provider if users are configured
     if config.allowed_users:
         providers.append(WhitelistAuthProvider(config.allowed_users))
 
-    # Add token provider if enabled
     if config.enable_token_auth:
-        token_storage = InMemoryTokenStorage()  # TODO: Use database storage
+        token_storage = InMemoryTokenStorage()
         providers.append(TokenAuthProvider(config.auth_token_secret, token_storage))
 
-    # Fall back to allowing all users in development mode
     if not providers and config.development_mode:
-        logger.warning(
-            "No auth providers configured"
-            " - creating development-only allow-all provider"
-        )
+        logger.warning("No auth providers configured - dev allow-all mode")
         providers.append(WhitelistAuthProvider([], allow_all_dev=True))
     elif not providers:
         raise ConfigurationError("No authentication providers configured")
@@ -132,15 +116,13 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     )
     rate_limiter = RateLimiter(config)
 
-    # Create audit storage and logger
-    audit_storage = InMemoryAuditStorage()  # TODO: Use database storage in production
+    audit_storage = InMemoryAuditStorage()
     audit_logger = AuditLogger(audit_storage)
 
-    # Create Claude integration components with persistent storage
+    # Create Claude integration
     session_storage = SQLiteSessionStorage(storage.db_manager)
     session_manager = SessionManager(config, session_storage)
 
-    # Create Claude SDK manager and integration facade
     logger.info("Using Claude Python SDK integration")
     sdk_manager = ClaudeSDKManager(config, security_validator=security_validator)
 
@@ -150,27 +132,6 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         session_manager=session_manager,
     )
 
-    # --- Event bus and agentic platform components ---
-    event_bus = EventBus()
-
-    # Event security middleware
-    event_security = EventSecurityMiddleware(
-        event_bus=event_bus,
-        security_validator=security_validator,
-        auth_manager=auth_manager,
-    )
-    event_security.register()
-
-    # Agent handler — translates events into Claude executions
-    agent_handler = AgentHandler(
-        event_bus=event_bus,
-        claude_integration=claude_integration,
-        default_working_directory=config.approved_directory,
-        default_user_id=config.allowed_users[0] if config.allowed_users else 0,
-    )
-    agent_handler.register()
-
-    # Create bot with all dependencies
     dependencies = {
         "auth_manager": auth_manager,
         "security_validator": security_validator,
@@ -178,16 +139,9 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         "audit_logger": audit_logger,
         "claude_integration": claude_integration,
         "storage": storage,
-        "event_bus": event_bus,
-        "project_registry": None,
-        "project_threads_manager": None,
     }
 
     bot = ClaudeCodeBot(config, dependencies)
-
-    # Notification service and scheduler need the bot's Telegram Bot instance,
-    # which is only available after bot.initialize(). We store placeholders
-    # and wire them up in run_application() after initialization.
 
     logger.info("Application components created successfully")
 
@@ -197,8 +151,6 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         "storage": storage,
         "config": config,
         "features": features,
-        "event_bus": event_bus,
-        "agent_handler": agent_handler,
         "auth_manager": auth_manager,
         "security_validator": security_validator,
     }
@@ -210,15 +162,7 @@ async def run_application(app: Dict[str, Any]) -> None:
     bot: ClaudeCodeBot = app["bot"]
     claude_integration: ClaudeIntegration = app["claude_integration"]
     storage: Storage = app["storage"]
-    config: Settings = app["config"]
-    features: FeatureFlags = app["features"]
-    event_bus: EventBus = app["event_bus"]
 
-    notification_service: Optional[NotificationService] = None
-    scheduler: Optional[JobScheduler] = None
-    project_threads_manager: Optional[ProjectThreadManager] = None
-
-    # Set up signal handlers for graceful shutdown
     shutdown_event = asyncio.Event()
 
     def signal_handler(signum: int, frame: Any) -> None:
@@ -230,113 +174,24 @@ async def run_application(app: Dict[str, Any]) -> None:
 
     try:
         logger.info("Starting Claude Code Telegram Bot")
-
-        # Initialize the bot first (creates the Telegram Application)
         await bot.initialize()
 
-        if config.enable_project_threads:
-            if not config.projects_config_path:
-                raise ConfigurationError(
-                    "Project thread mode enabled but required settings are missing"
-                )
-            registry = load_project_registry(
-                config_path=config.projects_config_path,
-                approved_directory=config.approved_directory,
-            )
-            project_threads_manager = ProjectThreadManager(
-                registry=registry,
-                repository=storage.project_threads,
-                sync_action_interval_seconds=(
-                    config.project_threads_sync_action_interval_seconds
-                ),
-            )
-
-            bot.deps["project_registry"] = registry
-            bot.deps["project_threads_manager"] = project_threads_manager
-
-            if config.project_threads_mode == "group":
-                if config.project_threads_chat_id is None:
-                    raise ConfigurationError(
-                        "Group thread mode requires PROJECT_THREADS_CHAT_ID"
-                    )
-                sync_result = await project_threads_manager.sync_topics(
-                    bot.app.bot,
-                    chat_id=config.project_threads_chat_id,
-                )
-                logger.info(
-                    "Project thread startup sync complete",
-                    mode=config.project_threads_mode,
-                    chat_id=config.project_threads_chat_id,
-                    created=sync_result.created,
-                    reused=sync_result.reused,
-                    renamed=sync_result.renamed,
-                    failed=sync_result.failed,
-                    deactivated=sync_result.deactivated,
-                )
-
-        # Now wire up components that need the Telegram Bot instance
-        telegram_bot = bot.app.bot
-
-        # Start event bus
-        await event_bus.start()
-
-        # Notification service
-        notification_service = NotificationService(
-            event_bus=event_bus,
-            bot=telegram_bot,
-            default_chat_ids=config.notification_chat_ids or [],
-        )
-        notification_service.register()
-        await notification_service.start()
-
-        # Collect concurrent tasks
         tasks = []
-
-        # Bot task — use start() which handles its own initialization check
         bot_task = asyncio.create_task(bot.start())
         tasks.append(bot_task)
 
-        # API server (if enabled)
-        if features.api_server_enabled:
-            from src.api.server import run_api_server
-
-            api_task = asyncio.create_task(
-                run_api_server(event_bus, config, storage.db_manager)
-            )
-            tasks.append(api_task)
-            logger.info("API server enabled", port=config.api_server_port)
-
-        # Scheduler (if enabled)
-        if features.scheduler_enabled:
-            scheduler = JobScheduler(
-                event_bus=event_bus,
-                db_manager=storage.db_manager,
-                default_working_directory=config.approved_directory,
-            )
-            await scheduler.start()
-            logger.info("Job scheduler enabled")
-
-        # Shutdown task
         shutdown_task = asyncio.create_task(shutdown_event.wait())
         tasks.append(shutdown_task)
 
-        # Wait for any task to complete or shutdown signal
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
-        # Check completed tasks for exceptions
         for task in done:
             if task.cancelled():
                 continue
             exc = task.exception()
             if exc is not None:
-                logger.error(
-                    "Task failed",
-                    task=task.get_name(),
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                )
+                logger.error("Task failed", task=task.get_name(), error=str(exc))
 
-        # Cancel remaining tasks
         for task in pending:
             task.cancel()
             try:
@@ -348,15 +203,8 @@ async def run_application(app: Dict[str, Any]) -> None:
         logger.error("Application error", error=str(e))
         raise
     finally:
-        # Ordered shutdown: scheduler -> API -> notification -> bot -> claude -> storage
         logger.info("Shutting down application")
-
         try:
-            if scheduler:
-                await scheduler.stop()
-            if notification_service:
-                await notification_service.stop()
-            await event_bus.stop()
             await bot.stop()
             await claude_integration.shutdown()
             await storage.close()
@@ -375,7 +223,6 @@ async def main() -> None:
     logger.info("Starting Claude Code Telegram Bot", version=__version__)
 
     try:
-        # Load configuration
         from src.config import FeatureFlags, load_config
 
         config = load_config(config_file=args.config_file)
@@ -388,7 +235,6 @@ async def main() -> None:
             debug=config.debug,
         )
 
-        # Initialize bot and Claude integration
         app = await create_application(config)
         await run_application(app)
 
