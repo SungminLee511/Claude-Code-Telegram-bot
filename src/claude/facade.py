@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional
 import structlog
 
 from ..config.settings import Settings
+from .exceptions import ClaudeTimeoutError
 from .sdk_integration import ClaudeResponse, ClaudeSDKManager, StreamUpdate
 from .session import SessionManager
 
@@ -91,6 +92,15 @@ class ClaudeIntegration:
                     interrupt_event=interrupt_event,
                     images=images,
                 )
+            except (asyncio.TimeoutError, ClaudeTimeoutError):
+                # Wall-clock timeout — the session is still healthy on Claude's
+                # side, just the user-configured timeout fired. Do NOT remove
+                # the session; let the caller retry on the next message.
+                logger.warning(
+                    "Claude command timed out; preserving session for resume",
+                    session_id=session.session_id,
+                )
+                raise
             except Exception as resume_error:
                 # If resume failed (e.g., session expired/missing on Claude's side),
                 # retry as a fresh session.  The CLI returns a generic exit-code-1
