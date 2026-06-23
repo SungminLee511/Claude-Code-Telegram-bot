@@ -34,13 +34,21 @@ SPOOL_DIR="${INJECT_BASE}/${BOT_ID}"
 LEGACY_FILE="/tmp/claude_inject_message.json"
 LOG_FILE="/tmp/wake_after.log"
 
-# JSON-escape the message once, up front.
-MSG_JSON="$(printf '%s' "$MESSAGE" | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read()))')"
+# Pass the raw message + chat id to the delayed worker via the ENVIRONMENT
+# (not string interpolation) so single/double quotes, parentheses, etc. in the
+# message can never break the shell quoting of the generated script. The JSON
+# payload is built by python inside the worker, which is quote-safe.
+export WAKE_MESSAGE="$MESSAGE"
+export WAKE_CHAT_ID_RESOLVED="$CHAT_ID"
 
 nohup bash -c "
     sleep ${DELAY}
     echo \"[\$(date -u)] firing wake after ${DELAY}s (bot=${BOT_ID})\" >> ${LOG_FILE}
-    PAYLOAD='{ \"chat_id\": ${CHAT_ID}, \"text\": ${MSG_JSON} }'
+    PAYLOAD=\"\$(python3 -c 'import json, os; print(json.dumps({\"chat_id\": int(os.environ[\"WAKE_CHAT_ID_RESOLVED\"]), \"text\": os.environ[\"WAKE_MESSAGE\"]}))')\"
+    if [ -z \"\$PAYLOAD\" ]; then
+        echo \"[\$(date -u)] ERROR: empty payload, aborting wake\" >> ${LOG_FILE}
+        exit 1
+    fi
     if [ \"${BOT_ID}\" = \"main\" ]; then
         # Legacy single file (atomic via tmp+mv to avoid half-written reads).
         TMP=\"${LEGACY_FILE}.tmp.\$\$\"
