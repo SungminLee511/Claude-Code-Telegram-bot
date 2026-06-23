@@ -40,7 +40,7 @@ PY
 is_running() {
     local bid="$1"
     if [ "$bid" = "main" ]; then
-        pgrep -af "[s]rc\.main" 2>/dev/null | grep -v -- "--config-file" | grep -q .
+        pgrep -af "[s]rc\.main" 2>/dev/null | grep -v -- "--config-file" | grep -v "main_codex" | grep -q .
     else
         pgrep -f "[s]rc\.main.*--config-file[ =]*${bid}\.env" >/dev/null 2>&1
     fi
@@ -70,7 +70,7 @@ case "$ACTION" in
     stop)
         for bid in "${BOT_IDS[@]}"; do
             if [ "$bid" = "main" ]; then
-                PIDS=$(pgrep -af "[s]rc\.main" 2>/dev/null | grep -v -- "--config-file" | awk '{print $1}')
+                PIDS=$(pgrep -af "[s]rc\.main" 2>/dev/null | grep -v -- "--config-file" | grep -v "main_codex" | awk '{print $1}')
             else
                 PIDS=$(pgrep -f "[s]rc\.main.*--config-file[ =]*${bid}\.env" 2>/dev/null || true)
             fi

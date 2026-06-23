@@ -37,9 +37,11 @@ fi
 # Return PIDs belonging ONLY to this bot.
 matching_pids() {
     if [ "$BOT_ID" = "main" ]; then
-        # bare src.main, excluding any process that carries a --config-file
+        # bare `src.main`, excluding any --config-file process AND the codex
+        # bot (`src.main_codex`), which would otherwise match the substring.
         pgrep -af "[s]rc\.main" 2>/dev/null \
             | grep -v -- "--config-file" \
+            | grep -v "main_codex" \
             | awk '{print $1}'
     else
         pgrep -f "[s]rc\.main.*--config-file[ =]*${ENV_FILE}" 2>/dev/null || true
