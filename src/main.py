@@ -90,6 +90,13 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     features = FeatureFlags(config)
 
     # Initialize storage system
+    logger.info(
+        "Resolved per-bot storage",
+        bot_id=config.bot_id,
+        database_url=config.database_url,
+        database_path=str(config.database_path) if config.database_path else None,
+        inject_spool_dir=str(config.inject_spool_dir),
+    )
     storage = Storage(config.database_url)
     await storage.initialize()
 

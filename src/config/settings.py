@@ -489,6 +489,14 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_cross_field_dependencies(self) -> "Settings":
         """Validate dependencies between fields."""
+        # Per-bot DB isolation: if this is a non-default bot and the DB URL was
+        # left at the shared default, derive a per-bot SQLite file so two bots
+        # never write the same DB (sessions/auth/lock contention). The 'main'
+        # bot keeps data/bot.db unchanged (no migration needed). An explicit
+        # DATABASE_URL in the .env always wins.
+        if self.bot_id != "main" and self.database_url == DEFAULT_DATABASE_URL:
+            self.database_url = f"sqlite:///data/bot_{self.bot_id}.db"
+
         # Check auth token requirements
         if self.enable_token_auth and not self.auth_token_secret:
             raise ValueError(
