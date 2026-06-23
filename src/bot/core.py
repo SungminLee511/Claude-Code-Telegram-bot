@@ -233,8 +233,31 @@ class ClaudeCodeBot:
                 # Self-wake hook: watch a file for synthetic user messages.
                 # Lets nohup'd bash scripts (e.g. long-running experiments)
                 # send themselves a wake-up message via JSON file drop.
-                from .inject_watcher import inject_watcher_loop
-                inject_task = asyncio.create_task(inject_watcher_loop(self.app))
+                from .inject_watcher import (
+                    DEFAULT_INJECT_PATH,
+                    inject_watcher_loop,
+                )
+                # Per-bot spool dir keeps wakes isolated between concurrent
+                # bots. The legacy single-file path is only honoured for the
+                # default 'main' bot (backward compatibility); other bots pass
+                # legacy_path=None so they never steal a 'main' wake.
+                spool_dir = self.settings.inject_spool_dir
+                legacy_path = (
+                    None if self.settings.bot_id != "main" else DEFAULT_INJECT_PATH
+                )
+                logger.info(
+                    "starting inject watcher",
+                    bot_id=self.settings.bot_id,
+                    spool_dir=str(spool_dir),
+                    legacy_enabled=legacy_path is not None,
+                )
+                inject_task = asyncio.create_task(
+                    inject_watcher_loop(
+                        self.app,
+                        spool_dir=spool_dir,
+                        legacy_path=legacy_path,
+                    )
+                )
 
                 # Keep running until manually stopped
                 while self.is_running:
