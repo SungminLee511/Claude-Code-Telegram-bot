@@ -82,10 +82,45 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _assert_ports_available(config: Settings) -> None:
+    """Fail fast with a clear message if a needed port is already bound.
+
+    Multi-bot: two bots with the same API/webhook port would otherwise crash
+    deep in the server stack with an opaque traceback. Only ports for ENABLED
+    features are checked — most bots run with both disabled, in which case
+    ports are irrelevant and nothing is checked.
+    """
+    import socket
+
+    logger = structlog.get_logger()
+    to_check = []
+    if config.enable_api_server:
+        to_check.append(("api_server_port", config.api_server_port))
+    if config.webhook_url:
+        to_check.append(("webhook_port", config.webhook_port))
+
+    for name, port in to_check:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("0.0.0.0", port))
+        except OSError as e:
+            raise ConfigurationError(
+                f"Port {port} ({name}) for bot '{config.bot_id}' is already in "
+                f"use ({e}). Give each bot a distinct {name} in its .env."
+            ) from e
+        finally:
+            sock.close()
+        logger.info("Port available", bot_id=config.bot_id, name=name, port=port)
+
+
 async def create_application(config: Settings) -> Dict[str, Any]:
     """Create and configure the application components."""
     logger = structlog.get_logger()
     logger.info("Creating application components")
+
+    # Fail fast on port collisions between concurrent bots (enabled features).
+    _assert_ports_available(config)
 
     features = FeatureFlags(config)
 
