@@ -286,6 +286,20 @@ class Settings(BaseSettings):
     enable_telemetry: bool = Field(False, description="Enable anonymous telemetry")
     sentry_dsn: Optional[str] = Field(None, description="Sentry DSN for error tracking")
 
+    # Multi-bot isolation
+    bot_id: str = Field(
+        "main",
+        description="Short slug identifying this bot instance. All per-bot "
+        "resources (inject spool dir, default DB path, relay-state file, "
+        "process match) derive from this. Default 'main' = legacy single-bot.",
+    )
+    inject_dir: str = Field(
+        "/tmp/claude_inject",
+        description="Base directory for the self-wake inject spool. Each bot "
+        "watches '<inject_dir>/<bot_id>/'. Legacy single-file path is still "
+        "honoured for bot_id='main' (backward compatible).",
+    )
+
     # Development
     debug: bool = Field(False, description="Enable debug mode")
     development_mode: bool = Field(False, description="Enable development features")
@@ -513,6 +527,19 @@ class Settings(BaseSettings):
             db_path = self.database_url.replace("sqlite:///", "")
             return Path(db_path).resolve()
         return None
+
+    @property
+    def inject_spool_dir(self) -> Path:
+        """Per-bot self-wake spool directory: '<inject_dir>/<bot_id>/'.
+
+        Each bot watches its own subdir so wakes never cross between bots.
+        """
+        return Path(self.inject_dir) / self.bot_id
+
+    @property
+    def relay_state_path(self) -> Path:
+        """Per-bot relay kill-switch state file."""
+        return Path("/tmp") / f"claude_relay_state_{self.bot_id}.json"
 
     @property
     def telegram_token_str(self) -> str:
