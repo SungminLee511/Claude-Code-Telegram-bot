@@ -16,11 +16,7 @@ bots:
     env_file: .env
     enabled: true
 
-  # Example second bot (disabled by default). To use: create work.env with
-  #   BOT_ID=work
-  #   TELEGRAM_BOT_TOKEN=<second token>
-  #   (distinct API_SERVER_PORT/WEBHOOK_PORT only if those servers are enabled)
-  # then set enabled: true.
-  - bot_id: work
-    env_file: work.env
-    enabled: false
+  # Second bot — @claudecodeonskypilot2bot. Config in bot2.env (gitignored).
+  - bot_id: bot2
+    env_file: bot2.env
+    enabled: true
