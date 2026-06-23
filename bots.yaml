@@ -20,3 +20,8 @@ bots:
   - bot_id: bot2
     env_file: bot2.env
     enabled: true
+
+  # Third bot — @claudecodeonskypilot3bot. Config in bot3.env (gitignored).
+  - bot_id: bot3
+    env_file: bot3.env
+    enabled: true

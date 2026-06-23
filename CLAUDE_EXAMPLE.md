@@ -49,24 +49,49 @@ tail -f <script>.log
 
 Exception: when running tests, you can run however you like, but still use the configured Python environment.
 
-# Restart Bot
+# Restart Bot (multi-bot aware)
 
-When the user says to restart the bot, run `restart_bot.sh` detached so the script outlives this session's death:
+The repo can run **multiple independent bots**, one per token, fully isolated
+(spool dir, DB, log, process match all keyed by `BOT_ID`). The registry lives in
+`<bot_repo>/bots.yaml`; each bot has a `<BOT_ID>.env` (the `main` bot uses bare
+`.env` and runs without `--config-file` for legacy compatibility).
+
+`restart_bot.sh [BOT_ID]` restarts **only that one bot** — its scoped `pgrep`
+match means restarting one bot **never touches the others**. Default is `main`.
+
+Determine which bot hosts this session with `echo "${BOT_ID:-main}"`, then
+restart that bot detached so the script outlives this session's death:
 
 ```bash
-cd <bot_repo> && nohup bash restart_bot.sh > restart.log 2>&1 & disown
+cd <bot_repo> && nohup bash restart_bot.sh "${BOT_ID:-main}" > restart_${BOT_ID:-main}.log 2>&1 & disown
 ```
 
-Why detached: the script may kill the bot, which may kill this session too. If launched normally, the subprocess tree can die before the new bot starts. `nohup ... & disown` lets the script survive.
+Why detached: restarting the bot that hosts THIS session may kill the session.
+If launched normally, the subprocess tree can die before the new bot starts.
+`nohup ... & disown` lets the script survive. (Restarting a *different* bot than
+the host does not kill this session — but keep the detached pattern for safety.)
 
 Sequence:
 1. Launch script in background, detached.
 2. Tool returns immediately.
-3. Script kills bot.
-4. Script starts new bot via `nohup`.
+3. Script kills the target bot (if it's the host, this session dies too).
+4. Script starts new bot via `nohup` (log `bot.log` for main, `bot_<BOT_ID>.log` otherwise).
 5. User sends new message, creating a fresh session.
 
-Cannot confirm success if this session dies. User verifies by sending a message after a short delay.
+Cannot confirm success when restarting the host bot if this session dies.
+User verifies by sending a message after a short delay.
+
+Other useful commands (all leave unrelated bots running):
+- `./start_bot.sh <BOT_ID>` — start one bot WITHOUT killing anything (use to add a bot).
+- `./supervise.sh status|start|restart|stop` — act on every `enabled` bot in `bots.yaml`
+  (`restart`/`stop` affect ALL enabled bots).
+
+Adding a new bot:
+1. Create `<BOT_ID>.env` (copy an existing one; set `BOT_ID`, `TELEGRAM_BOT_TOKEN`,
+   `TELEGRAM_BOT_USERNAME`, `ALLOWED_USERS`). DB and inject spool auto-derive
+   from `BOT_ID` (`data/bot_<BOT_ID>.db`, `/tmp/claude_inject/<BOT_ID>/`).
+2. Add a `{bot_id, env_file, enabled: true}` entry to `bots.yaml`.
+3. `./start_bot.sh <BOT_ID>` — starts only the new bot, others untouched.
 
 # Auto-wake via Telegram bot inject (`wake_after.sh`)
 
