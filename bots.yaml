@@ -1,0 +1,26 @@
+# Multi-bot registry for supervise.sh.
+#
+# Each entry describes one bot instance. The supervisor uses start_bot.sh /
+# restart_bot.sh per bot, which already isolate process-match, DB, inject
+# spool, and logs by bot_id. See MULTI_BOT_PLAN.md.
+#
+# Fields:
+#   bot_id   : short slug; selects spool dir, DB default, log, process match.
+#   env_file : .env file passed via --config-file (ignored for bot_id 'main',
+#              which runs bare for backward compatibility). Must set BOT_ID,
+#              TELEGRAM_BOT_TOKEN, and (if servers enabled) distinct ports.
+#   enabled  : whether the supervisor manages this bot.
+
+bots:
+  - bot_id: main
+    env_file: .env
+    enabled: true
+
+  # Example second bot (disabled by default). To use: create work.env with
+  #   BOT_ID=work
+  #   TELEGRAM_BOT_TOKEN=<second token>
+  #   (distinct API_SERVER_PORT/WEBHOOK_PORT only if those servers are enabled)
+  # then set enabled: true.
+  - bot_id: work
+    env_file: work.env
+    enabled: false
