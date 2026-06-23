@@ -4,6 +4,7 @@ Provides simple interface for bot handlers.
 """
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -15,6 +16,28 @@ from .sdk_integration import ClaudeResponse, ClaudeSDKManager, StreamUpdate
 from .session import SessionManager
 
 logger = structlog.get_logger()
+
+# When the bundled `claude` CLI subprocess is killed by a signal it exits with
+# 128+signal: SIGTERM=143, SIGKILL=137. This is a *transient* kill (host
+# restart, OOM, an external `kill`, a deploy) — the on-disk session transcript
+# is intact, so re-resuming the SAME session id recovers full context. This is
+# NOT the same as a genuine "session gone" (the CLI exits 1 with a "No
+# conversation found" message), and NOT the same as a user interrupt (handled
+# in-process as a cancellation, never reaching this layer).
+_SUBPROCESS_KILL_RE = re.compile(r"exit code (?:143|137)\b")
+
+# Bounded same-id resume retries after a transient subprocess kill. Kept small
+# and self-contained (no extra config plumbing): worst case after exhaustion is
+# identical to the legacy fresh-session fallback.
+_RESUME_AFTER_KILL_MAX_ATTEMPTS = 3
+_RESUME_AFTER_KILL_BASE_DELAY = 1.0
+_RESUME_AFTER_KILL_MAX_DELAY = 5.0
+
+
+def _is_transient_subprocess_kill(error: BaseException) -> bool:
+    """True when the Claude CLI subprocess was killed by a signal (exit
+    143/137) rather than exiting because the session is unusable."""
+    return bool(_SUBPROCESS_KILL_RE.search(str(error)))
 
 
 class ClaudeIntegration:
@@ -102,10 +125,66 @@ class ClaudeIntegration:
                 )
                 raise
             except Exception as resume_error:
-                # If resume failed (e.g., session expired/missing on Claude's side),
-                # retry as a fresh session.  The CLI returns a generic exit-code-1
-                # when the session is gone, so we catch *any* error during resume.
-                if should_continue:
+                # New sessions have no id to resume — nothing to recover.
+                if not should_continue:
+                    raise
+
+                response = None
+
+                # A transient subprocess kill (SIGTERM/SIGKILL, exit 143/137)
+                # leaves the session transcript intact on disk. Re-resume the
+                # SAME id with bounded backoff *before* discarding any context.
+                # Previously this branch treated every resume failure as
+                # "session gone" and started a fresh, empty session — turning a
+                # momentary kill into permanent context loss.
+                if _is_transient_subprocess_kill(resume_error):
+                    last_kill_error: Exception = resume_error
+                    for attempt in range(1, _RESUME_AFTER_KILL_MAX_ATTEMPTS + 1):
+                        delay = min(
+                            _RESUME_AFTER_KILL_BASE_DELAY * (2 ** (attempt - 1)),
+                            _RESUME_AFTER_KILL_MAX_DELAY,
+                        )
+                        logger.warning(
+                            "Claude subprocess killed (exit 143/137); "
+                            "re-resuming same session to preserve context",
+                            session_id=session.session_id,
+                            attempt=attempt,
+                            max_attempts=_RESUME_AFTER_KILL_MAX_ATTEMPTS,
+                            delay_seconds=delay,
+                            error=str(last_kill_error),
+                        )
+                        await asyncio.sleep(delay)
+                        try:
+                            response = await self._execute(
+                                prompt=prompt,
+                                working_directory=working_directory,
+                                session_id=claude_session_id,
+                                continue_session=True,
+                                stream_callback=on_stream,
+                                interrupt_event=interrupt_event,
+                                images=images,
+                            )
+                            logger.info(
+                                "Recovered session after subprocess kill",
+                                session_id=session.session_id,
+                                attempt=attempt,
+                            )
+                            break  # recovered with full context intact
+                        except (asyncio.TimeoutError, ClaudeTimeoutError):
+                            # Hard timeout — session still healthy; let caller
+                            # retry on the next message. Do not discard.
+                            raise
+                        except Exception as retry_error:
+                            last_kill_error = retry_error
+                            if not _is_transient_subprocess_kill(retry_error):
+                                # Turned into a real session error — stop
+                                # retrying and fall through to fresh fallback.
+                                break
+
+                # Either the failure was not a transient kill (e.g. the session
+                # is genuinely gone), or same-id resume retries were exhausted:
+                # fall back to a fresh session so the bot keeps working.
+                if response is None:
                     logger.warning(
                         "Session resume failed, starting fresh session",
                         failed_session_id=claude_session_id,
@@ -127,8 +206,6 @@ class ClaudeIntegration:
                         interrupt_event=interrupt_event,
                         images=images,
                     )
-                else:
-                    raise
 
             # Update session (assigns real session_id for new sessions)
             await self.session_manager.update_session(session, response)
