@@ -137,3 +137,38 @@ PART G: 4  →  **22 steps total.**
 
 Every shared singleton from §0 (C1–C6) is removed or keyed by `BOT_ID`; no
 remaining shared mutable state exists between bot processes.
+
+---
+
+## Implementation status — DONE (all 22 steps, branch `multi_bot`)
+
+| Part | Steps | Where | Verified |
+|------|-------|-------|----------|
+| A | A1–A4 | `settings.py` (`bot_id`, `inject_dir`, `inject_spool_dir`, `relay_state_path`), `inject_watcher.py` (spool-dir FIFO + atomic claim + legacy shim), `core.py` (wires per-bot spool) | unit tests G1/G3 pass |
+| B | B1–B3 | `wake_after.sh` (BOT_ID arg, atomic spool writes), `relay_state_path` | spool write verified (unique file, valid JSON) |
+| C | C1–C2 | `settings.py` validator (`sqlite:///data/bot_<id>.db`), `main.py` startup log | derivation verified (work→bot_work.db, main→bot.db) |
+| D | D1–D3 | `restart_bot.sh` (scoped match), `start_bot.sh` | bash -n + match logic; `--config-file`→`load_dotenv` confirmed |
+| E | E1–E2 | `main.py` `_assert_ports_available` | raise-on-collision + pass-when-free tested |
+| F | F1 | `bots.yaml`, `supervise.sh` | `status` detects live main |
+| G | G1–G4 | `tests/bot/test_inject_watcher_multibot.py` | 6/6 pass |
+
+### How to run a second bot
+1. Create `work.env` with `BOT_ID=work`, a second `TELEGRAM_BOT_TOKEN`, and
+   (only if API/webhook enabled) distinct `API_SERVER_PORT`/`WEBHOOK_PORT`.
+2. `./start_bot.sh work`  (or set `enabled: true` in `bots.yaml` + `./supervise.sh start`).
+3. Wake it: `./wake_after.sh 30 "RELAY: ..." work`.
+
+### G2 — manual 2-bot smoke test (needs two real tokens)
+Automated isolation is covered by `test_watcher_consumes_only_its_own_spool`.
+Full live check:
+1. Start both: `./start_bot.sh main` and `./start_bot.sh work`.
+2. `./wake_after.sh 5 "hello-A" main` and `./wake_after.sh 5 "hello-B" work`.
+3. Assert each wake lands in **only** its own bot (check `bot.log` /
+   `bot_work.log` for the synthetic message; confirm DBs `data/bot.db` vs
+   `data/bot_work.db` diverge). No 409 in either log.
+
+### G4 — rollback
+All changes are **additive + backward compatible** (default `bot_id="main"`
+reproduces legacy behaviour exactly). To revert any file:
+`git checkout master -- <file>`. No DB migration is required for `main`
+(it keeps `data/bot.db`). Deleting the branch removes everything.
