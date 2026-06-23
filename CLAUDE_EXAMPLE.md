@@ -106,7 +106,9 @@ For Pattern B relay-style use of `wake_after.sh`, the user may specify max-time 
 - `"proceed in relay, max 2h, max 50 turns"` means both.
 - `"proceed in relay"` means no kill switch.
 
-When limits are specified, create relay state:
+At relay start, determine this session's bot via `echo "${BOT_ID:-main}"` (it is exported into every bot session) and use per-bot `/tmp` paths throughout, so concurrent relays on different bots never share state.
+
+When limits are specified, create a per-bot relay-state file `/tmp/claude_relay_state_${BOT_ID:-main}.json` (for the default `main` bot this is `/tmp/claude_relay_state_main.json`):
 
 ```json
 {
@@ -135,7 +137,7 @@ Before each `wake_after.sh` call:
 2. If turn limit has been reached, stop and report the kill-switch.
 3. Otherwise increment `turn_count`, save state, append status line, schedule next wake.
 
-Delete relay state when the relay halts so a fresh relay starts cleanly.
+Delete the per-bot relay-state file (`/tmp/claude_relay_state_${BOT_ID:-main}.json`) when the relay halts so a fresh relay starts cleanly. To cancel a pending wake, clear this bot's inject file — `rm -f /tmp/claude_inject_message.json` for the `main` bot, or `rm -f /tmp/claude_inject/$BOT_ID/*.json` for a named bot.
 
 # Repo Skills (SKILL.md)
 
