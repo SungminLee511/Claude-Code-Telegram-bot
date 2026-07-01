@@ -107,9 +107,9 @@ Two patterns:
   ```
   The wake fires automatically. Pattern A wakeups should not count against Pattern B relay max turns or max time.
 
-- **Pattern B — step-relay**: when the user says "proceed all steps in relay" or similar, after each finished step schedule a 30-second wake just before ending the assistant message:
+- **Pattern B — step-relay**: when the user says "proceed all steps in relay" or similar, after each finished step schedule a 10-second wake just before ending the assistant message:
   ```bash
-  ./wake_after.sh 30 "RELAY: proceed to next step."
+  ./wake_after.sh 10 "RELAY: proceed to next step."
   ```
   The user sees each per-step report like a normal "proceed next step" loop.
 
