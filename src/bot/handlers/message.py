@@ -25,6 +25,8 @@ from ..utils.image_extractor import (
     should_send_as_photo,
     validate_image_path,
 )
+from ..utils import uploads
+from ..utils.session_header import attach_header
 
 logger = structlog.get_logger()
 
@@ -427,6 +429,9 @@ async def handle_text_message(
             formatted_messages = formatter.format_claude_response(
                 claude_response.content
             )
+            formatted_messages = attach_header(
+                formatted_messages, context, claude_response
+            )
 
         except Exception as e:
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
@@ -696,8 +701,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     )
                 return
 
-        # Check file size limits
-        max_size = 10 * 1024 * 1024  # 10MB
+        # Check file size limits (Telegram's bot API download ceiling)
+        max_size = 20 * 1024 * 1024  # 20MB
         if document.file_size > max_size:
             await update.message.reply_text(
                 f"❌ <b>File Too Large</b>\n\n"
@@ -725,66 +730,30 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             parse_mode="HTML",
         )
 
-        # Check if enhanced file handler is available
-        features = context.bot_data.get("features")
-        file_handler = features.get_file_handler() if features else None
-
-        if file_handler:
-            # Use enhanced file handler
-            try:
-                processed_file = await file_handler.handle_document_upload(
-                    document,
-                    user_id,
-                    update.message.caption or "Please review this file:",
-                )
-                prompt = processed_file.prompt
-
-                # Update progress message with file type info
-                await progress_msg.edit_text(
-                    f"📄 Processing {processed_file.type} file: <code>{document.file_name}</code>...",
-                    parse_mode="HTML",
-                )
-
-            except Exception as e:
-                logger.warning(
-                    "Enhanced file handler failed, falling back to basic handler",
-                    error=str(e),
-                )
-                file_handler = None  # Fall back to basic handling
-
-        if not file_handler:
-            # Fall back to basic file handling
-            file = await document.get_file()
-            file_bytes = await file.download_as_bytearray()
-
-            # Try to decode as text
-            try:
-                content = file_bytes.decode("utf-8")
-
-                # Check content length
-                max_content_length = 50000  # 50KB of text
-                if len(content) > max_content_length:
-                    content = (
-                        content[:max_content_length]
-                        + "\n... (file truncated for processing)"
-                    )
-
-                # Create prompt with file content
-                caption = update.message.caption or "Please review this file:"
-                prompt = f"{caption}\n\n**File:** `{document.file_name}`\n\n```\n{content}\n```"
-
-            except UnicodeDecodeError:
-                await progress_msg.edit_text(
-                    "❌ <b>File Format Not Supported</b>\n\n"
-                    "File must be text-based and UTF-8 encoded.\n\n"
-                    "<b>Supported formats:</b>\n"
-                    "• Source code files (.py, .js, .ts, etc.)\n"
-                    "• Text files (.txt, .md)\n"
-                    "• Configuration files (.json, .yaml, .toml)\n"
-                    "• Documentation files",
-                    parse_mode="HTML",
-                )
-                return
+        # Save to the upload inbox and give Claude the path. Binary formats
+        # (PDF, images, archives) work because nothing has to be decoded here.
+        try:
+            tg_file = await document.get_file()
+            saved_path = await uploads.save_telegram_file(
+                tg_file, document.file_name, update.message.message_id
+            )
+            prompt = uploads.build_prompt(
+                saved_path, update.message.caption, kind="file"
+            )
+            uploads.cleanup()
+            await progress_msg.edit_text(
+                f"📄 Saved <code>{escape_html(saved_path.name)}</code> "
+                f"({uploads.human_size(saved_path.stat().st_size)})...",
+                parse_mode="HTML",
+            )
+        except Exception as exc:
+            logger.error("Upload save failed", error=str(exc), user_id=user_id)
+            await progress_msg.edit_text(
+                "❌ <b>Could not save the file</b>\n\n"
+                f"{escape_html(str(exc))}",
+                parse_mode="HTML",
+            )
+            return
 
         # Delete progress message
         await progress_msg.delete()
@@ -834,6 +803,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             formatter = ResponseFormatter(settings)
             formatted_messages = formatter.format_claude_response(
                 claude_response.content
+            )
+            formatted_messages = attach_header(
+                formatted_messages, context, claude_response
             )
 
             # Delete progress message
@@ -913,6 +885,22 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 photo, update.message.caption
             )
 
+            # Keep a copy on disk as well, so the image stays referencable by
+            # path after the inline base64 block scrolls out of context.
+            try:
+                tg_file = await photo.get_file()
+                saved_path = await uploads.save_telegram_file(
+                    tg_file,
+                    f"photo_{photo.file_unique_id}.jpg",
+                    update.message.message_id,
+                )
+                processed_image.prompt = (
+                    f"{processed_image.prompt}\n\n[uploaded image] `{saved_path}`"
+                )
+                uploads.cleanup()
+            except Exception as exc:
+                logger.warning("Photo copy to inbox failed", error=str(exc))
+
             # Delete progress message
             await progress_msg.delete()
 
@@ -956,6 +944,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 formatter = ResponseFormatter(settings)
                 formatted_messages = formatter.format_claude_response(
                     claude_response.content
+                )
+                formatted_messages = attach_header(
+                    formatted_messages, context, claude_response
                 )
 
                 # Delete progress message
@@ -1086,6 +1077,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             formatter = ResponseFormatter(settings)
             formatted_messages = formatter.format_claude_response(
                 claude_response.content
+            )
+            formatted_messages = attach_header(
+                formatted_messages, context, claude_response
             )
 
             await progress_msg.delete()

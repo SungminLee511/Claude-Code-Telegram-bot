@@ -1,0 +1,345 @@
+"""Tests for the /sessions picker."""
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from src.bot.handlers import session_picker as sp
+from src.claude.session_index import SessionInfo
+
+
+@pytest.fixture(autouse=True)
+def isolated_db_dir(tmp_path, monkeypatch):
+    """Never let the owner scan touch the host's real bot DBs."""
+    monkeypatch.setattr(sp, "DB_DIR", tmp_path / "data")
+    return tmp_path / "data"
+
+
+def make_info(idx, title=None, turns=3, cwd="/home"):
+    return SessionInfo(
+        session_id=f"{idx:08d}-1111-2222-3333-444444444444",
+        path=f"/tmp/{idx}.jsonl",
+        title=title or f"Session {idx}",
+        first_prompt=f"prompt {idx}",
+        last_prompt=f"last {idx}",
+        user_turns=turns,
+        cwd=cwd,
+        size=1024,
+        mtime=1_700_000_000 - idx,
+    )
+
+
+class FakeIndex:
+    def __init__(self, sessions):
+        self.sessions = sessions
+
+    def refresh(self):
+        return self.sessions
+
+    def search(self, query):
+        return [s for s in self.sessions if query.lower() in s.display_name.lower()]
+
+
+class FakeStorage:
+    def __init__(self):
+        self.saved = []
+        self.known = {}
+
+    async def load_session(self, session_id, user_id):
+        return self.known.get(session_id)
+
+    async def save_session(self, session):
+        self.saved.append(session)
+        self.known[session.session_id] = session
+
+    async def get_all_sessions(self):
+        return list(self.known.values())
+
+
+class FakeQuery:
+    def __init__(self, data):
+        self.data = data
+        self.edited = None
+        self.markup = None
+        self.answered = False
+
+    async def answer(self):
+        self.answered = True
+
+    async def edit_message_text(self, text, parse_mode=None, reply_markup=None):
+        self.edited = text
+        self.markup = reply_markup
+
+
+def make_context(sessions, current=None):
+    storage = FakeStorage()
+    manager = SimpleNamespace(storage=storage, active_sessions={})
+    return SimpleNamespace(
+        args=[],
+        user_data={"claude_session_id": current} if current else {},
+        bot_data={
+            "settings": SimpleNamespace(bot_id="main", approved_directory=Path("/home")),
+            "claude_integration": SimpleNamespace(session_manager=manager),
+            "_session_index": FakeIndex(sessions),
+        },
+    )
+
+
+def make_update(query):
+    return SimpleNamespace(
+        callback_query=query,
+        effective_user=SimpleNamespace(id=777),
+    )
+
+
+# --- rendering ---------------------------------------------------------------
+
+
+def test_page_lists_at_most_page_size_entries():
+    sessions = [make_info(i) for i in range(20)]
+    text = sp._page_text(sessions, 0, 2, None, "")
+
+    assert "page 1/2" in text
+    assert "Session 0" in text
+    assert "Session 9" in text
+    assert "Session 10" not in text
+
+
+def test_second_page_shows_the_next_slice():
+    sessions = [make_info(i) for i in range(20)]
+    text = sp._page_text(sessions, 1, 2, None, "")
+
+    assert "Session 10" in text
+    assert "Session 0\n" not in text
+
+
+def test_owning_bot_is_shown_per_entry():
+    sessions = [make_info(i) for i in range(2)]
+    owners = {sessions[0].session_id: "bot2"}
+    text = sp._page_text(sessions, 0, 1, None, "", owners)
+
+    assert "bot bot2" in text
+    assert "bot ?" in text  # unknown owner still renders
+
+
+def test_current_session_is_starred():
+    sessions = [make_info(i) for i in range(3)]
+    text = sp._page_text(sessions, 0, 1, sessions[1].session_id, "")
+
+    starred = [line for line in text.splitlines() if "⭐" in line]
+    assert len(starred) == 1
+    assert "Session 1" in starred[0]
+
+
+def test_filter_is_shown_in_the_header():
+    assert "filter:" in sp._page_text([make_info(1)], 0, 1, None, "iasbs")
+
+
+def test_empty_list_says_so():
+    assert "No sessions found" in sp._page_text([], 0, 0, None, "")
+
+
+def test_html_in_a_title_is_escaped():
+    text = sp._page_text([make_info(1, title="<i>sneaky</i>")], 0, 1, None, "")
+    assert "&lt;i&gt;" in text
+
+
+def test_keyboard_numbers_map_to_absolute_positions():
+    sessions = [make_info(i) for i in range(20)]
+    markup = sp._page_keyboard(sessions, 1, 2)
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+
+    assert "sess:open:10" in data  # first button on page 2
+    assert "sess:open:19" in data
+    assert "sess:page:0" in data
+
+
+def test_first_page_has_no_back_button():
+    markup = sp._page_keyboard([make_info(i) for i in range(20)], 0, 2)
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert "sess:page:-1" not in data
+    assert any(d == "sess:page:1" for d in data)
+
+
+def test_last_page_has_no_forward_button():
+    markup = sp._page_keyboard([make_info(i) for i in range(20)], 1, 2)
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert "sess:page:2" not in data
+
+
+# --- callbacks ---------------------------------------------------------------
+
+
+async def test_open_shows_the_detail_card():
+    sessions = [make_info(i) for i in range(3)]
+    context = make_context(sessions)
+    query = FakeQuery("sess:open:1")
+
+    await sp.sessions_callback(make_update(query), context)
+
+    assert "Session 1" in query.edited
+    assert sessions[1].session_id in query.edited
+    assert "last 1" in query.edited
+    data = [b.callback_data for row in query.markup.inline_keyboard for b in row]
+    assert "sess:go:1" in data and "sess:prev:1" in data and "sess:page:0" in data
+
+
+async def test_resume_points_the_chat_at_the_session():
+    sessions = [make_info(i) for i in range(3)]
+    context = make_context(sessions)
+    query = FakeQuery("sess:go:2")
+
+    await sp.sessions_callback(make_update(query), context)
+
+    assert context.user_data["claude_session_id"] == sessions[2].session_id
+    assert context.user_data["force_new_session"] is False
+    assert context.user_data["current_directory"] == Path("/home")
+    assert "Resumed" in query.edited
+
+
+async def test_resume_writes_a_db_row_so_the_sdk_can_resume():
+    """Without a stored row SessionManager would mint a fresh empty session."""
+    sessions = [make_info(5)]
+    context = make_context(sessions)
+    storage = context.bot_data["claude_integration"].session_manager.storage
+
+    await sp.sessions_callback(make_update(FakeQuery("sess:go:0")), context)
+
+    assert len(storage.saved) == 1
+    saved = storage.saved[0]
+    assert saved.session_id == sessions[0].session_id
+    assert saved.user_id == 777
+    assert saved.project_path == Path("/home")
+
+
+async def test_resume_does_not_duplicate_an_existing_row():
+    sessions = [make_info(5)]
+    context = make_context(sessions)
+    manager = context.bot_data["claude_integration"].session_manager
+    manager.storage.known[sessions[0].session_id] = "already here"
+
+    await sp.sessions_callback(make_update(FakeQuery("sess:go:0")), context)
+
+    assert manager.storage.saved == []
+    assert context.user_data["claude_session_id"] == sessions[0].session_id
+
+
+async def test_resume_uses_the_session_cwd():
+    sessions = [make_info(1, cwd="/home/RESEARCH/iasbs")]
+    context = make_context(sessions)
+
+    await sp.sessions_callback(make_update(FakeQuery("sess:go:0")), context)
+
+    assert context.user_data["current_directory"] == Path("/home/RESEARCH/iasbs")
+
+
+async def test_page_callback_redraws_the_list():
+    context = make_context([make_info(i) for i in range(20)])
+    context.user_data[sp._ALL_KEY] = True
+    query = FakeQuery("sess:page:1")
+
+    await sp.sessions_callback(make_update(query), context)
+
+    assert "page 2/2" in query.edited
+
+
+async def test_default_listing_is_capped_at_ten():
+    context = make_context([make_info(i) for i in range(20)])
+    sessions = sp._load_sessions(context, "")
+
+    assert len(sessions) == sp.MAX_SESSIONS == 10
+    assert len(sp._load_sessions(context, "", show_all=True)) == 20
+
+
+async def test_out_of_range_position_is_reported_not_crashed():
+    context = make_context([make_info(1)])
+    query = FakeQuery("sess:open:99")
+
+    await sp.sessions_callback(make_update(query), context)
+
+    assert "gone" in query.edited.lower()
+
+
+async def test_malformed_callback_data_is_handled():
+    context = make_context([make_info(1)])
+    query = FakeQuery("sess:open:notanumber")
+
+    await sp.sessions_callback(make_update(query), context)
+
+    assert "Bad session action" in query.edited
+
+
+# --- owner lookup -------------------------------------------------------------
+
+
+def _make_db(path, session_ids):
+    import sqlite3
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute("create table sessions (session_id text primary key)")
+    conn.executemany("insert into sessions values (?)", [(s,) for s in session_ids])
+    conn.commit()
+    conn.close()
+
+
+def test_owner_scan_reads_every_bot_db(isolated_db_dir):
+    _make_db(isolated_db_dir / "bot.db", ["aaa"])
+    _make_db(isolated_db_dir / "bot_bot2.db", ["bbb"])
+    _make_db(isolated_db_dir / "bot_bot3.db", ["ccc"])
+
+    owners = sp._scan_owners()
+
+    assert owners == {"aaa": "main", "bbb": "bot2", "ccc": "bot3"}
+
+
+def test_owner_scan_survives_a_junk_db(isolated_db_dir):
+    _make_db(isolated_db_dir / "bot.db", ["aaa"])
+    (isolated_db_dir / "bot_broken.db").write_text("not a database")
+
+    assert sp._scan_owners() == {"aaa": "main"}
+
+
+def test_owner_scan_on_missing_dir_is_empty(isolated_db_dir):
+    assert sp._scan_owners() == {}
+
+
+def test_owner_map_is_cached_between_calls(isolated_db_dir):
+    _make_db(isolated_db_dir / "bot.db", ["aaa"])
+    context = make_context([])
+
+    assert sp.session_owners(context) == {"aaa": "main"}
+
+    # A later write is not picked up until the TTL expires.
+    _make_db(isolated_db_dir / "bot_bot2.db", ["bbb"])
+    assert sp.session_owners(context) == {"aaa": "main"}
+
+
+async def test_detail_card_names_the_owning_bot(isolated_db_dir):
+    sessions = [make_info(1)]
+    _make_db(isolated_db_dir / "bot_bot2.db", [sessions[0].session_id])
+    context = make_context(sessions)
+    query = FakeQuery("sess:open:0")
+
+    await sp.sessions_callback(make_update(query), context)
+
+    assert "bot <code>bot2</code>" in query.edited
+
+
+async def test_preview_renders_transcript_tail(tmp_path, monkeypatch):
+    info = make_info(1)
+    context = make_context([info])
+    monkeypatch.setattr(
+        sp,
+        "tail_messages",
+        lambda path, limit=8: [
+            {"role": "user", "text": "ping", "ts": ""},
+            {"role": "assistant", "text": "pong", "ts": ""},
+        ],
+    )
+    query = FakeQuery("sess:prev:0")
+
+    await sp.sessions_callback(make_update(query), context)
+
+    assert "ping" in query.edited and "pong" in query.edited

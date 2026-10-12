@@ -247,6 +247,13 @@ class Settings(BaseSettings):
         True,
         description="Conversational agentic mode (default) vs classic command mode",
     )
+    session_header: bool = Field(
+        True,
+        description=(
+            "Prepend a session banner (name, id, cwd, bot) to Claude's replies. "
+            "Display-only: added after the model answers, never sent to Claude."
+        ),
+    )
 
     # Reply quoting
     reply_quote: bool = Field(

@@ -1,6 +1,5 @@
 """Telegram bot authentication middleware."""
 
-from datetime import UTC, datetime
 from typing import Any, Callable, Dict
 
 import structlog
@@ -82,12 +81,11 @@ async def auth_middleware(handler: Callable, event: Any, data: Dict[str, Any]) -
             auth_provider=session.auth_provider if session else None,
         )
 
-        # Welcome message for new session
-        if event.effective_message:
-            await event.effective_message.reply_text(
-                f"🔓 Welcome! You are now authenticated.\n"
-                f"Session started at {datetime.now(UTC).strftime('%H:%M:%S UTC')}"
-            )
+        # Deliberately silent. Auth sessions live in memory only, so every bot
+        # restart (and the 24h idle timeout) re-authenticates — a greeting here
+        # fires on the first message after each restart, which is noise for a
+        # whitelist bot whose user is always authorized. The log line above is
+        # the record; only *failed* auth is worth telling the chat about.
 
         # Continue to handler
         return await handler(event, data)

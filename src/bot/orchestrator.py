@@ -41,6 +41,9 @@ from .utils.image_extractor import (
     should_send_as_photo,
     validate_image_path,
 )
+from .utils import uploads
+from .utils.progress_registry import ProgressRegistry
+from .utils.session_header import attach_header
 
 logger = structlog.get_logger()
 
@@ -137,6 +140,52 @@ class MessageOrchestrator:
         self.deps = deps
         self._active_requests: Dict[int, ActiveRequest] = {}
         self._known_commands: frozenset[str] = frozenset()
+        self.progress_registry = ProgressRegistry(
+            Path("data") / f"pending_progress_{settings.bot_id}.json"
+        )
+
+    async def _open_progress(self, update: Update, text: str, **kwargs: Any):
+        """Send a progress message and record it as in-flight."""
+        msg = await update.message.reply_text(text, **kwargs)
+        try:
+            self.progress_registry.add(msg.chat_id, msg.message_id)
+        except Exception:  # pragma: no cover - bookkeeping must never block
+            logger.debug("Failed to record progress message")
+        return msg
+
+    def _forget_progress(self, msg: Any) -> None:
+        """Stop tracking a progress message that reached a final state.
+
+        Used when the message is *edited* into an error instead of deleted:
+        it already says what happened, so a later restart must not overwrite
+        it with "interrupted".
+        """
+        if msg is None:
+            return
+        try:
+            self.progress_registry.discard(msg.chat_id, msg.message_id)
+        except Exception:  # pragma: no cover
+            logger.debug("Failed to clear progress record")
+
+    async def _close_progress(self, msg: Any) -> None:
+        """Delete a progress message and drop it from the in-flight record."""
+        if msg is None:
+            return
+        self._forget_progress(msg)
+        try:
+            await msg.delete()
+        except Exception:
+            logger.debug("Failed to delete progress message, ignoring")
+
+    async def _fail_progress(
+        self, msg: Any, text: str, parse_mode: Optional[str] = None
+    ) -> None:
+        """Turn a progress message into its own error message, and stop tracking."""
+        self._forget_progress(msg)
+        try:
+            await msg.edit_text(text, parse_mode=parse_mode, reply_markup=None)
+        except Exception:
+            logger.debug("Failed to edit progress message into an error")
 
     def _inject_deps(self, handler: Callable) -> Callable:  # type: ignore[type-arg]
         """Wrap handler to inject dependencies into context.bot_data."""
@@ -320,13 +369,14 @@ class MessageOrchestrator:
 
     def _register_agentic_handlers(self, app: Application) -> None:
         """Register agentic handlers: commands + text/file/photo."""
-        from .handlers import command
+        from .handlers import command, session_picker
 
         # Commands
         handlers = [
             ("start", self.agentic_start),
             ("new", self.agentic_new),
             ("status", self.agentic_status),
+            ("sessions", session_picker.sessions_command),
             ("verbose", self.agentic_verbose),
             ("repo", self.agentic_repo),
             ("restart", command.restart_command),
@@ -390,6 +440,14 @@ class MessageOrchestrator:
             )
         )
 
+        # Session picker callbacks (/sessions list -> detail -> resume)
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(session_picker.sessions_callback),
+                pattern=r"^sess:",
+            )
+        )
+
         # Only cd: callbacks (for project selection), scoped by pattern
         app.add_handler(
             CallbackQueryHandler(
@@ -402,13 +460,14 @@ class MessageOrchestrator:
 
     def _register_classic_handlers(self, app: Application) -> None:
         """Register full classic handler set (moved from core.py)."""
-        from .handlers import callback, command, message
+        from .handlers import callback, command, message, session_picker
 
         handlers = [
             ("start", command.start_command),
             ("help", command.help_command),
             ("new", command.new_session),
             ("continue", command.continue_session),
+            ("sessions", session_picker.sessions_command),
             ("end", command.end_session),
             ("ls", command.list_files),
             ("cd", command.change_directory),
@@ -447,11 +506,19 @@ class MessageOrchestrator:
             MessageHandler(filters.VOICE, self._inject_deps(message.handle_voice)),
             group=10,
         )
+        # Session picker first: its pattern is scoped, so the catch-all
+        # callback handler below never sees `sess:` data.
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(session_picker.sessions_callback),
+                pattern=r"^sess:",
+            )
+        )
         app.add_handler(
             CallbackQueryHandler(self._inject_deps(callback.handle_callback_query))
         )
 
-        logger.info("Classic handlers registered (13 commands + full handler set)")
+        logger.info("Classic handlers registered (14 commands + full handler set)")
 
     async def get_bot_commands(self) -> list:  # type: ignore[type-arg]
         """Return bot commands appropriate for current mode."""
@@ -460,6 +527,7 @@ class MessageOrchestrator:
                 BotCommand("start", "Start the bot"),
                 BotCommand("new", "Start a fresh session"),
                 BotCommand("status", "Show session status"),
+                BotCommand("sessions", "Browse and switch sessions"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
                 BotCommand("repo", "List repos / switch workspace"),
                 BotCommand("restart", "Restart the bot"),
@@ -473,6 +541,7 @@ class MessageOrchestrator:
                 BotCommand("help", "Show available commands"),
                 BotCommand("new", "Clear context and start fresh session"),
                 BotCommand("continue", "Explicitly continue last session"),
+                BotCommand("sessions", "Browse and switch sessions"),
                 BotCommand("end", "End current session and clear context"),
                 BotCommand("ls", "List files in current directory"),
                 BotCommand("cd", "Change directory (resumes project session)"),
@@ -945,8 +1014,8 @@ class MessageOrchestrator:
         stop_kb = InlineKeyboardMarkup(
             [[InlineKeyboardButton("Stop", callback_data=f"stop:{user_id}")]]
         )
-        progress_msg = await update.message.reply_text(
-            "Working...", reply_markup=stop_kb
+        progress_msg = await self._open_progress(
+            update, "Working...", reply_markup=stop_kb
         )
 
         # Register active request for stop callback
@@ -960,9 +1029,8 @@ class MessageOrchestrator:
         claude_integration = context.bot_data.get("claude_integration")
         if not claude_integration:
             self._active_requests.pop(user_id, None)
-            await progress_msg.edit_text(
-                "Claude integration not available. Check configuration.",
-                reply_markup=None,
+            await self._fail_progress(
+                progress_msg, "Claude integration not available. Check configuration."
             )
             return
 
@@ -1057,6 +1125,9 @@ class MessageOrchestrator:
                 ) + "\n\n_(Interrupted by user)_"
 
             formatted_messages = formatter.format_claude_response(response_content)
+            formatted_messages = attach_header(
+                formatted_messages, context, claude_response
+            )
 
         except Exception as e:
             success = False
@@ -1076,10 +1147,7 @@ class MessageOrchestrator:
                 except Exception:
                     logger.debug("Draft flush failed in finally block", user_id=user_id)
 
-        try:
-            await progress_msg.delete()
-        except Exception:
-            logger.debug("Failed to delete progress message, ignoring")
+        await self._close_progress(progress_msg)
 
         # Use MCP-collected images (from send_image_to_user tool calls)
         images: List[ImageAttachment] = mcp_images
@@ -1182,57 +1250,43 @@ class MessageOrchestrator:
                 await update.message.reply_text(f"File rejected: {error}")
                 return
 
-        # Size check
-        max_size = 10 * 1024 * 1024
+        # Size check — Telegram's bot API caps downloads at 20 MB.
+        max_size = 20 * 1024 * 1024
         if document.file_size > max_size:
             await update.message.reply_text(
-                f"File too large ({document.file_size / 1024 / 1024:.1f}MB). Max: 10MB."
+                f"File too large ({document.file_size / 1024 / 1024:.1f}MB). Max: 20MB."
             )
             return
 
         chat = update.message.chat
         await chat.send_action("typing")
-        progress_msg = await update.message.reply_text("Working...")
+        progress_msg = await self._open_progress(update, "Working...")
 
-        # Try enhanced file handler, fall back to basic
-        features = context.bot_data.get("features")
-        file_handler = features.get_file_handler() if features else None
+        # Save the upload to the inbox and hand Claude the *path*. Inlining the
+        # bytes would cap us at text files small enough to fit in a prompt;
+        # a path works for PDFs, archives and multi-MB data alike.
         prompt: Optional[str] = None
-
-        if file_handler:
-            try:
-                processed_file = await file_handler.handle_document_upload(
-                    document,
-                    user_id,
-                    update.message.caption or "Please review this file:",
-                )
-                prompt = processed_file.prompt
-            except Exception:
-                file_handler = None
-
-        if not file_handler:
-            file = await document.get_file()
-            file_bytes = await file.download_as_bytearray()
-            try:
-                content = file_bytes.decode("utf-8")
-                if len(content) > 50000:
-                    content = content[:50000] + "\n... (truncated)"
-                caption = update.message.caption or "Please review this file:"
-                prompt = (
-                    f"{caption}\n\n**File:** `{document.file_name}`\n\n"
-                    f"```\n{content}\n```"
-                )
-            except UnicodeDecodeError:
-                await progress_msg.edit_text(
-                    "Unsupported file format. Must be text-based (UTF-8)."
-                )
-                return
+        try:
+            tg_file = await document.get_file()
+            saved_path = await uploads.save_telegram_file(
+                tg_file, document.file_name, update.message.message_id
+            )
+            prompt = uploads.build_prompt(
+                saved_path, update.message.caption, kind="file"
+            )
+            uploads.cleanup()
+        except Exception as exc:
+            logger.error("Upload save failed", error=str(exc), user_id=user_id)
+            await self._fail_progress(
+                progress_msg, f"Could not save the file: {exc}"
+            )
+            return
 
         # Process with Claude
         claude_integration = context.bot_data.get("claude_integration")
         if not claude_integration:
-            await progress_msg.edit_text(
-                "Claude integration not available. Check configuration."
+            await self._fail_progress(
+                progress_msg, "Claude integration not available. Check configuration."
             )
             return
 
@@ -1285,11 +1339,11 @@ class MessageOrchestrator:
             formatted_messages = formatter.format_claude_response(
                 claude_response.content
             )
+            formatted_messages = attach_header(
+                formatted_messages, context, claude_response
+            )
 
-            try:
-                await progress_msg.delete()
-            except Exception:
-                logger.debug("Failed to delete progress message, ignoring")
+            await self._close_progress(progress_msg)
 
             # Use MCP-collected images (from send_image_to_user tool calls)
             images: List[ImageAttachment] = mcp_images_doc
@@ -1335,7 +1389,9 @@ class MessageOrchestrator:
         except Exception as e:
             from .handlers.message import _format_error_message
 
-            await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
+            await self._fail_progress(
+                progress_msg, _format_error_message(e), parse_mode="HTML"
+            )
             logger.error("Claude file processing failed", error=str(e), user_id=user_id)
         finally:
             heartbeat.cancel()
@@ -1355,7 +1411,7 @@ class MessageOrchestrator:
 
         chat = update.message.chat
         await chat.send_action("typing")
-        progress_msg = await update.message.reply_text("Working...")
+        progress_msg = await self._open_progress(update, "Working...")
 
         try:
             photo = update.message.photo[-1]
@@ -1370,10 +1426,26 @@ class MessageOrchestrator:
                 }
             ]
 
+            # Claude sees the pixels inline (base64 block), but also keep a
+            # copy on disk so it can be re-opened, cropped or referenced by
+            # path later in the conversation.
+            prompt = processed_image.prompt
+            try:
+                tg_file = await photo.get_file()
+                saved_path = await uploads.save_telegram_file(
+                    tg_file,
+                    f"photo_{photo.file_unique_id}.{fmt}",
+                    update.message.message_id,
+                )
+                prompt = f"{prompt}\n\n[uploaded image] `{saved_path}`"
+                uploads.cleanup()
+            except Exception as exc:
+                logger.warning("Photo copy to inbox failed", error=str(exc))
+
             await self._handle_agentic_media_message(
                 update=update,
                 context=context,
-                prompt=processed_image.prompt,
+                prompt=prompt,
                 progress_msg=progress_msg,
                 user_id=user_id,
                 chat=chat,
@@ -1383,7 +1455,9 @@ class MessageOrchestrator:
         except Exception as e:
             from .handlers.message import _format_error_message
 
-            await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
+            await self._fail_progress(
+                progress_msg, _format_error_message(e), parse_mode="HTML"
+            )
             logger.error(
                 "Claude photo processing failed", error=str(e), user_id=user_id
             )
@@ -1403,7 +1477,7 @@ class MessageOrchestrator:
 
         chat = update.message.chat
         await chat.send_action("typing")
-        progress_msg = await update.message.reply_text("Transcribing...")
+        progress_msg = await self._open_progress(update, "Transcribing...")
 
         try:
             voice = update.message.voice
@@ -1424,7 +1498,9 @@ class MessageOrchestrator:
         except Exception as e:
             from .handlers.message import _format_error_message
 
-            await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
+            await self._fail_progress(
+                progress_msg, _format_error_message(e), parse_mode="HTML"
+            )
             logger.error(
                 "Claude voice processing failed", error=str(e), user_id=user_id
             )
@@ -1443,8 +1519,8 @@ class MessageOrchestrator:
         """Run a media-derived prompt through Claude and send responses."""
         claude_integration = context.bot_data.get("claude_integration")
         if not claude_integration:
-            await progress_msg.edit_text(
-                "Claude integration not available. Check configuration."
+            await self._fail_progress(
+                progress_msg, "Claude integration not available. Check configuration."
             )
             return
 
@@ -1495,11 +1571,9 @@ class MessageOrchestrator:
 
         formatter = ResponseFormatter(self.settings)
         formatted_messages = formatter.format_claude_response(claude_response.content)
+        formatted_messages = attach_header(formatted_messages, context, claude_response)
 
-        try:
-            await progress_msg.delete()
-        except Exception:
-            logger.debug("Failed to delete progress message, ignoring")
+        await self._close_progress(progress_msg)
 
         # Use MCP-collected images (from send_image_to_user tool calls).
         images: List[ImageAttachment] = mcp_images_media

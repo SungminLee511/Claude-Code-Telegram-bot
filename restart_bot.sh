@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || { echo "[restart_bot] ERROR: cannot cd to $SCRIPT_DIR"; exit 1; }
 
 BOT_ID="${1:-${BOT_ID:-main}}"
-PYTHON_BIN="${PYTHON_BIN:-/home/sky/miniconda3/envs/Telegram-bot-env/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-$SCRIPT_DIR/.venv/bin/python}"
 
 if [ "$BOT_ID" = "main" ]; then
     LOG_FILE="$SCRIPT_DIR/bot.log"

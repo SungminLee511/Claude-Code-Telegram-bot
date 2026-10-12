@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || { echo "[supervise] ERROR: cannot cd to $SCRIPT_DIR"; exit 1; }
 
 BOTS_YAML="${BOTS_YAML:-$SCRIPT_DIR/bots.yaml}"
-PYTHON_BIN="${PYTHON_BIN:-/home/sky/miniconda3/envs/Telegram-bot-env/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-$SCRIPT_DIR/.venv/bin/python}"
 ACTION="${1:-status}"
 
 if [ ! -f "$BOTS_YAML" ]; then

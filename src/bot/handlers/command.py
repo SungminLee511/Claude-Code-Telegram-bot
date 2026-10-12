@@ -22,6 +22,7 @@ from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
 from ...storage.models import SessionModel
 from ..utils.html_format import escape_html
+from ..utils.session_header import attach_header
 
 logger = structlog.get_logger()
 
@@ -435,6 +436,9 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             formatter = ResponseFormatter(settings)
             formatted_messages = formatter.format_claude_response(
                 claude_response.content
+            )
+            formatted_messages = attach_header(
+                formatted_messages, context, claude_response
             )
 
             for msg in formatted_messages:

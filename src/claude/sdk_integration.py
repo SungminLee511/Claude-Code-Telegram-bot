@@ -177,15 +177,29 @@ class StreamUpdate:
         return None
 
 
+# Tools that need an interactive UI the bot cannot draw. Asking over Telegram
+# means asking in plain text, so these are denied with an instruction the model
+# can act on rather than left to time out and return nothing.
+_INTERACTIVE_TOOLS = {
+    "AskUserQuestion": (
+        "AskUserQuestion is not available over Telegram — there is no UI to "
+        "render the choices, so the answer would come back empty. Ask the "
+        "question as plain text in your reply instead (numbered options are "
+        "fine), then stop and wait for the user to answer."
+    ),
+}
+
+
 def _make_can_use_tool_callback(
-    security_validator: SecurityValidator,
+    security_validator: Optional[SecurityValidator],
     working_directory: Path,
     approved_directory: Path,
 ) -> Any:
     """Create a can_use_tool callback for SDK-level tool permission validation.
 
     The callback validates file path boundaries and bash directory boundaries
-    *before* the SDK executes the tool, providing preventive security enforcement.
+    *before* the SDK executes the tool, providing preventive security
+    enforcement, and blocks tools that require an interactive UI.
     """
     _FILE_TOOLS = {"Write", "Edit", "Read", "create_file", "edit_file", "read_file"}
     _BASH_TOOLS = {"Bash", "bash", "shell"}
@@ -195,6 +209,16 @@ def _make_can_use_tool_callback(
         tool_input: Dict[str, Any],
         context: ToolPermissionContext,
     ) -> Any:
+        # Interactive tools have no Telegram equivalent. Denying with a reason
+        # turns a dead call into a redirect: the model reads the message as the
+        # tool result and re-asks in prose.
+        if tool_name in _INTERACTIVE_TOOLS:
+            logger.info("can_use_tool denied interactive tool", tool_name=tool_name)
+            return PermissionResultDeny(message=_INTERACTIVE_TOOLS[tool_name])
+
+        if security_validator is None:
+            return PermissionResultAllow()
+
         # File path validation
         if tool_name in _FILE_TOOLS:
             file_path = tool_input.get("file_path") or tool_input.get("path")
@@ -346,13 +370,14 @@ class ClaudeSDKManager:
                     mcp_config_path=str(self.config.mcp_config_path),
                 )
 
-            # Wire can_use_tool callback for preventive tool validation
-            if self.security_validator:
-                options.can_use_tool = _make_can_use_tool_callback(
-                    security_validator=self.security_validator,
-                    working_directory=working_directory,
-                    approved_directory=self.config.approved_directory,
-                )
+            # Wire can_use_tool callback for preventive tool validation. Always
+            # wired, even without a security validator, because it is also what
+            # blocks interactive-only tools like AskUserQuestion.
+            options.can_use_tool = _make_can_use_tool_callback(
+                security_validator=self.security_validator,
+                working_directory=working_directory,
+                approved_directory=self.config.approved_directory,
+            )
 
             # Resume previous session if we have a session_id
             if session_id and continue_session:
