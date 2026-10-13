@@ -100,21 +100,57 @@ def _usage_line() -> Optional[str]:
 
 
 _TOKENS_KEY = "context_tokens"
+_TOKENS_STORE_KEY = "_tokens_store"
 
 
-def _context_tokens(context, claude_response=None) -> Optional[int]:
+def _tokens_store(context):
+    """Last known context size per session, on disk.
+
+    `user_data` is memory only, so every restart used to drop the count and
+    the banner fell back to a message count — a number from a different scale
+    appearing without warning. Sessions survive restarts; their size should
+    too.
+    """
+    from pathlib import Path
+
+    from .choice_store import ChoiceStore
+
+    found = context.bot_data.get(_TOKENS_STORE_KEY)
+    if found is None:
+        settings = context.bot_data.get("settings")
+        bot_id = getattr(settings, "bot_id", "main") if settings else "main"
+        found = ChoiceStore(Path("data") / f"session_tokens_{bot_id}.json")
+        context.bot_data[_TOKENS_STORE_KEY] = found
+    return found
+
+
+def _context_tokens(context, session_id=None, claude_response=None) -> Optional[int]:
     """Context size for this reply, remembered for the ones in between.
 
     The count arrives with a reply, but the banner is also drawn for messages
-    that did not come from Claude. Keeping the last known number means those
-    show the same figure rather than silently dropping it.
+    that did not come from Claude, and for the first reply after a restart.
+    Both read the remembered value rather than showing nothing.
     """
     tokens = getattr(claude_response, "context_tokens", None)
     if isinstance(tokens, int) and tokens > 0:
         context.user_data[_TOKENS_KEY] = tokens
+        if session_id:
+            try:
+                _tokens_store(context).set(session_id, str(tokens))
+            except Exception as exc:
+                logger.debug("session_header: token save failed", error=str(exc))
         return tokens
+
     remembered = context.user_data.get(_TOKENS_KEY)
-    return remembered if isinstance(remembered, int) and remembered > 0 else None
+    if isinstance(remembered, int) and remembered > 0:
+        return remembered
+
+    try:
+        stored = _tokens_store(context).get(session_id)
+        return int(stored) if stored else None
+    except Exception as exc:
+        logger.debug("session_header: token lookup failed", error=str(exc))
+        return None
 
 
 def _compaction_suffix(info) -> str:
@@ -221,7 +257,7 @@ def build_header(context, claude_response=None) -> Optional[str]:
     # title already says which conversation this is, and the directory is
     # almost always the same one, so both were noise on every single reply.
     bits = []
-    tokens = _context_tokens(context, claude_response)
+    tokens = _context_tokens(context, session_id, claude_response)
     if tokens:
         bits.append(_format_tokens(tokens) + _compaction_suffix(info))
     elif message_count:

@@ -24,7 +24,7 @@ bots:
   # Third bot — @claudecodeonskypilot3bot. Config in bot3.env (gitignored).
   - bot_id: bot3
     env_file: bot3.env
-    enabled: true
+    enabled: false  # not running; flip to true and ./start_bot.sh bot3
 
   # Fourth bot — @claudecodeonskypilot4bot. Config in bot4.env (gitignored).
   - bot_id: bot4

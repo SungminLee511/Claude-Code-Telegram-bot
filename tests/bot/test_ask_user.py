@@ -71,6 +71,14 @@ async def tap(message, count, index):
     return ask_user.resolve(buttons(markup)[index].callback_data)
 
 
+async def tap_other(message, count=1):
+    """Press Other, then confirm it — the two taps the escape hatch needs."""
+    markup = await wait_for(message, count)
+    first = ask_user.tap(buttons(markup)[-1].callback_data)
+    assert first.kind == "confirm"
+    return ask_user.tap(buttons(first.keyboard)[-1].callback_data)
+
+
 # --- asking -----------------------------------------------------------------
 
 
@@ -90,7 +98,12 @@ async def test_every_option_becomes_a_button():
     task = asyncio.create_task(ask_user.ask(message, payload("A", "B", "C")))
     markup = await wait_for(message, 1)
 
-    assert [b.text for b in buttons(markup)] == ["A", "B", "C"]
+    assert [b.text for b in buttons(markup)] == [
+        "A",
+        "B",
+        "C",
+        ask_user.OTHER_LABEL,
+    ]
 
     await tap(message, 1, 0)
     await task
@@ -216,3 +229,143 @@ async def test_callback_data_stays_inside_telegrams_limit():
 
     await tap(message, 1, 0)
     await task
+
+
+# --- the escape hatch -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_every_question_offers_other():
+    """Four wrong options must never be the only way out."""
+    message = Message()
+    task = asyncio.create_task(ask_user.ask(message, payload("A")))
+    markup = await wait_for(message, 1)
+
+    assert buttons(markup)[-1].text == ask_user.OTHER_LABEL
+
+    await tap(message, 1, 0)
+    await task
+
+
+@pytest.mark.asyncio
+async def test_other_hands_the_question_back_as_prose():
+    """None of these fit -> release the turn so it can be asked in words."""
+    message = Message()
+    task = asyncio.create_task(ask_user.ask(message, payload("A", "B")))
+
+    confirmed = await tap_other(message)
+
+    assert confirmed.label == ask_user.OTHER_LABEL
+    assert await task == f"Which approach? → {ask_user.OTHER_ANSWER}"
+
+
+@pytest.mark.asyncio
+async def test_one_tap_on_other_only_asks_whether_you_meant_it():
+    """Other sits above the text field; a stray tap must not cost the question."""
+    message = Message()
+    task = asyncio.create_task(ask_user.ask(message, payload("A", "B")))
+    markup = await wait_for(message, 1)
+
+    result = ask_user.tap(buttons(markup)[-1].callback_data)
+
+    assert result.kind == "confirm"
+    assert not task.done()
+
+    await tap(message, 1, 0)
+    assert await task == "Which approach? → A"
+
+
+@pytest.mark.asyncio
+async def test_backing_out_of_other_restores_the_options():
+    message = Message()
+    task = asyncio.create_task(ask_user.ask(message, payload("A", "B")))
+    markup = await wait_for(message, 1)
+
+    confirm = ask_user.tap(buttons(markup)[-1].callback_data)
+    back = ask_user.tap(buttons(confirm.keyboard)[0].callback_data)
+
+    assert [b.text for b in buttons(back.keyboard)] == [
+        "A",
+        "B",
+        ask_user.OTHER_LABEL,
+    ]
+
+    assert ask_user.tap(buttons(back.keyboard)[1].callback_data).label == "B"
+    await task
+
+
+@pytest.mark.asyncio
+async def test_other_is_not_mistaken_for_an_option():
+    message = Message()
+    task = asyncio.create_task(ask_user.ask(message, payload("A", "B")))
+    markup = await wait_for(message, 1)
+
+    others = [b for b in buttons(markup) if b.callback_data.endswith(":x")]
+    assert len(others) == 1
+
+    await tap(message, 1, 0)
+    assert await task == "Which approach? → A"
+
+
+@pytest.mark.asyncio
+async def test_choosing_other_forgets_the_question():
+    message = Message()
+    task = asyncio.create_task(ask_user.ask(message, payload("A")))
+    await tap_other(message)
+    await task
+
+    assert ask_user.pending_count() == 0
+
+
+# --- answering by typing ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_typed_message_answers_the_question():
+    """The text box is the obvious place to answer; make it work."""
+    message = Message()
+    task = asyncio.create_task(ask_user.ask(message, payload("A", "B")))
+    await wait_for(message, 1)
+
+    assert ask_user.answer_with_text("neither, do C") is True
+
+    assert await task == "Which approach? → neither, do C"
+
+
+@pytest.mark.asyncio
+async def test_typing_clears_the_question():
+    message = Message()
+    task = asyncio.create_task(ask_user.ask(message, payload("A")))
+    await wait_for(message, 1)
+    ask_user.answer_with_text("something else")
+    await task
+
+    assert ask_user.pending_count() == 0
+
+
+def test_typing_with_nothing_pending_is_left_alone():
+    """Otherwise an ordinary message would be swallowed as an answer."""
+    assert ask_user.answer_with_text("just talking") is False
+
+
+@pytest.mark.asyncio
+async def test_an_empty_message_is_not_an_answer():
+    message = Message()
+    task = asyncio.create_task(ask_user.ask(message, payload("A")))
+    await wait_for(message, 1)
+
+    assert ask_user.answer_with_text("   ") is False
+    assert not task.done()
+
+    await tap(message, 1, 0)
+    await task
+
+
+@pytest.mark.asyncio
+async def test_a_typed_answer_is_used_verbatim():
+    message = Message()
+    task = asyncio.create_task(ask_user.ask(message, payload("A", "B")))
+    await wait_for(message, 1)
+    ask_user.answer_with_text("  option B but only on Tuesdays  ")
+
+    assert await task == "Which approach? → option B but only on Tuesdays"

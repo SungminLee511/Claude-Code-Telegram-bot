@@ -153,3 +153,8 @@ cli/
 
 # Files Claude leaves for the user; swept into the chat and deleted
 outbox/
+
+# Encrypted migration bundle — a backup, not source. Kept out of git.
+migration/
+# Stale timestamped backups of env/registry files (they hold live tokens).
+*.bak_*

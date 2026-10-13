@@ -1,8 +1,8 @@
 """Message orchestrator — single entry point for all Telegram updates.
 
-Routes messages based on agentic vs classic mode. In agentic mode, provides
-a minimal conversational interface (3 commands, no inline keyboards). In
-classic mode, delegates to existing full-featured handlers.
+Routes every message straight to Claude. There is one mode and it is
+conversational; commands exist only for the things a conversation cannot do
+— switching session, model, effort, or restarting the bot.
 """
 
 import asyncio
@@ -17,7 +17,6 @@ from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    InputMediaPhoto,
     Update,
 )
 from telegram.ext import (
@@ -37,11 +36,6 @@ class PrivateTopicsUnavailableError(Exception):
 from .utils.draft_streamer import DraftStreamer, generate_draft_id
 from .utils.durations import format_elapsed
 from .utils.html_format import escape_html
-from .utils.image_extractor import (
-    ImageAttachment,
-    should_send_as_photo,
-    validate_image_path,
-)
 from .utils import outbox, uploads
 from .handlers import branch_command, effort_command, model_command
 from .utils.progress_registry import ProgressRegistry
@@ -365,15 +359,12 @@ class MessageOrchestrator:
             await update.effective_message.reply_text(message, parse_mode="HTML")
 
     def register_handlers(self, app: Application) -> None:
-        """Register handlers based on mode."""
-        if self.settings.agentic_mode:
-            self._register_agentic_handlers(app)
-        else:
-            self._register_classic_handlers(app)
+        """Register the bot's handlers."""
+        self._register_agentic_handlers(app)
 
     def _register_agentic_handlers(self, app: Application) -> None:
         """Register agentic handlers: commands + text/file/photo."""
-        from .handlers import command, session_picker
+        from .handlers import admin_command, session_picker
 
         # Commands
         handlers = [
@@ -386,16 +377,27 @@ class MessageOrchestrator:
             ("model", model_command.model_command),
             ("effort", effort_command.effort_command),
             ("branch", branch_command.branch_command),
-            ("restart", command.restart_command),
+            ("restart", admin_command.restart_command),
         ]
         if self.settings.enable_project_threads:
-            handlers.append(("sync_threads", command.sync_threads))
+            handlers.append(("sync_threads", admin_command.sync_threads))
 
         # Derive known commands dynamically — avoids drift when new commands are added
         self._known_commands: frozenset[str] = frozenset(cmd for cmd, _ in handlers)
 
         for cmd, handler in handlers:
             app.add_handler(CommandHandler(cmd, self._inject_deps(handler)))
+
+        # A typed answer to a waiting question, before anything treats it as
+        # a new request. Group -1 so it runs after auth and before the text
+        # handler in group 10.
+        app.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                self._inject_deps(self._handle_typed_answer),
+            ),
+            group=-1,
+        )
 
         # Text messages -> Claude
         app.add_handler(
@@ -488,116 +490,25 @@ class MessageOrchestrator:
 
         logger.info("Agentic handlers registered")
 
-    def _register_classic_handlers(self, app: Application) -> None:
-        """Register full classic handler set (moved from core.py)."""
-        from .handlers import callback, command, message, session_picker
-
-        handlers = [
-            ("start", command.start_command),
-            ("help", command.help_command),
-            ("new", command.new_session),
-            ("continue", command.continue_session),
-            ("sessions", session_picker.sessions_command),
-            ("end", command.end_session),
-            ("ls", command.list_files),
-            ("cd", command.change_directory),
-            ("pwd", command.print_working_directory),
-            ("projects", command.show_projects),
-            ("status", command.session_status),
-            ("export", command.export_session),
-            ("actions", command.quick_actions),
-            ("git", command.git_command),
-            ("model", model_command.model_command),
-            ("effort", effort_command.effort_command),
-            ("branch", branch_command.branch_command),
-            ("restart", command.restart_command),
-        ]
-        if self.settings.enable_project_threads:
-            handlers.append(("sync_threads", command.sync_threads))
-
-        for cmd, handler in handlers:
-            app.add_handler(CommandHandler(cmd, self._inject_deps(handler)))
-
-        app.add_handler(
-            MessageHandler(
-                filters.TEXT & ~filters.COMMAND,
-                self._inject_deps(message.handle_text_message),
-            ),
-            group=10,
-        )
-        app.add_handler(
-            MessageHandler(
-                filters.Document.ALL, self._inject_deps(message.handle_document)
-            ),
-            group=10,
-        )
-        app.add_handler(
-            MessageHandler(filters.PHOTO, self._inject_deps(message.handle_photo)),
-            group=10,
-        )
-        app.add_handler(
-            MessageHandler(filters.VOICE, self._inject_deps(message.handle_voice)),
-            group=10,
-        )
-        # Session picker first: its pattern is scoped, so the catch-all
-        # callback handler below never sees `sess:` data.
-        app.add_handler(
-            CallbackQueryHandler(
-                self._inject_deps(session_picker.sessions_callback),
-                pattern=r"^sess:",
-            )
-        )
-        app.add_handler(
-            CallbackQueryHandler(self._inject_deps(callback.handle_callback_query))
-        )
-
-        logger.info("Classic handlers registered (14 commands + full handler set)")
-
     async def get_bot_commands(self) -> list:  # type: ignore[type-arg]
         """Return bot commands appropriate for current mode."""
-        if self.settings.agentic_mode:
-            commands = [
+        commands = [
                 # The menu is what you scroll before typing, so it holds the
                 # commands worth choosing from. `status`, `verbose` and `repo`
                 # still work when typed — they are hidden, not removed.
-                BotCommand("start", "Start the bot"),
-                BotCommand("new", "Start a fresh session"),
-                BotCommand("sessions", "Browse and switch sessions"),
+            BotCommand("start", "Start the bot"),
+            BotCommand("new", "Start a fresh session"),
+            BotCommand("sessions", "Browse and switch sessions"),
                 # Claude's own command, forwarded through: not a bot handler.
-                BotCommand("rename", "Rename this session"),
-                BotCommand("model", "Choose the model for this session"),
-                BotCommand("effort", "Set thinking effort for this session"),
-                BotCommand("branch", "Continue on a copy, leaving this one intact"),
-                BotCommand("restart", "Restart the bot"),
-            ]
-            if self.settings.enable_project_threads:
-                commands.append(BotCommand("sync_threads", "Sync project topics"))
-            return commands
-        else:
-            commands = [
-                BotCommand("start", "Start bot and show help"),
-                BotCommand("help", "Show available commands"),
-                BotCommand("new", "Clear context and start fresh session"),
-                BotCommand("continue", "Explicitly continue last session"),
-                BotCommand("sessions", "Browse and switch sessions"),
-                BotCommand("end", "End current session and clear context"),
-                BotCommand("ls", "List files in current directory"),
-                BotCommand("cd", "Change directory (resumes project session)"),
-                BotCommand("pwd", "Show current directory"),
-                BotCommand("projects", "Show all projects"),
-                BotCommand("status", "Show session status"),
-                BotCommand("export", "Export current session"),
-                BotCommand("actions", "Show quick actions"),
-                BotCommand("git", "Git repository commands"),
-                BotCommand("model", "Choose the model for this session"),
-                BotCommand("effort", "Set thinking effort for this session"),
-                BotCommand("branch", "Continue on a copy, leaving this one intact"),
-                BotCommand("restart", "Restart the bot"),
-            ]
-            if self.settings.enable_project_threads:
-                commands.append(BotCommand("sync_threads", "Sync project topics"))
-            return commands
-
+            BotCommand("rename", "Rename this session"),
+            BotCommand("model", "Choose the model for this session"),
+            BotCommand("effort", "Set thinking effort for this session"),
+            BotCommand("branch", "Continue on a copy, leaving this one intact"),
+            BotCommand("restart", "Restart the bot"),
+        ]
+        if self.settings.enable_project_threads:
+            commands.append(BotCommand("sync_threads", "Sync project topics"))
+        return commands
     # --- Agentic handlers ---
 
     async def agentic_start(
@@ -832,28 +743,17 @@ class MessageOrchestrator:
         tool_log: List[Dict[str, Any]],
         start_time: float,
         reply_markup: Optional[InlineKeyboardMarkup] = None,
-        mcp_images: Optional[List[ImageAttachment]] = None,
-        approved_directory: Optional[Path] = None,
         draft_streamer: Optional[DraftStreamer] = None,
         interrupt_event: Optional[asyncio.Event] = None,
     ) -> Optional[Callable[[StreamUpdate], Any]]:
         """Create a stream callback for verbose progress updates.
 
-        When *mcp_images* is provided, the callback also intercepts
-        ``send_image_to_user`` tool calls and collects validated
-        :class:`ImageAttachment` objects for later Telegram delivery.
-
-        When *draft_streamer* is provided, tool activity and assistant
-        text are streamed to the user in real time via
-        ``sendMessageDraft``.
 
         Returns None when verbose_level is 0 **and** no MCP image
         collection or draft streaming is requested.
         Typing indicators are handled by a separate heartbeat task.
         """
-        need_mcp_intercept = mcp_images is not None and approved_directory is not None
-
-        if verbose_level == 0 and not need_mcp_intercept and draft_streamer is None:
+        if verbose_level == 0 and draft_streamer is None:
             return None
 
         last_edit_time = [0.0]  # mutable container for closure
@@ -863,23 +763,6 @@ class MessageOrchestrator:
             if interrupt_event is not None and interrupt_event.is_set():
                 return
 
-            # Intercept send_image_to_user MCP tool calls.
-            # The SDK namespaces MCP tools as "mcp__<server>__<tool>",
-            # so match both the bare name and the namespaced variant.
-            if update_obj.tool_calls and need_mcp_intercept:
-                for tc in update_obj.tool_calls:
-                    tc_name = tc.get("name", "")
-                    if tc_name == "send_image_to_user" or tc_name.endswith(
-                        "__send_image_to_user"
-                    ):
-                        tc_input = tc.get("input", {})
-                        file_path = tc_input.get("file_path", "")
-                        caption = tc_input.get("caption", "")
-                        img = validate_image_path(
-                            file_path, approved_directory, caption
-                        )
-                        if img:
-                            mcp_images.append(img)
 
             # Capture tool calls
             if update_obj.tool_calls:
@@ -935,94 +818,24 @@ class MessageOrchestrator:
 
         return _on_stream
 
-    async def _send_images(
-        self,
-        update: Update,
-        images: List[ImageAttachment],
-        reply_to_message_id: Optional[int] = None,
-        caption: Optional[str] = None,
-        caption_parse_mode: Optional[str] = None,
-    ) -> bool:
-        """Send extracted images as a media group (album) or documents.
+    async def _handle_typed_answer(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Feed a typed message to the question a turn is blocked on."""
+        message = update.effective_message
+        if message is None or not message.text:
+            return
+        from telegram.ext import ApplicationHandlerStop
 
-        If *caption* is provided and fits (≤1024 chars), it is attached to the
-        photo / first album item so text + images appear as one message.
+        from .utils.ask_user import answer_with_text
 
-        Returns True if the caption was successfully embedded in the photo message.
-        """
-        photos: List[ImageAttachment] = []
-        documents: List[ImageAttachment] = []
-        for img in images:
-            if should_send_as_photo(img.path):
-                photos.append(img)
-            else:
-                documents.append(img)
-
-        # Telegram caption limit
-        use_caption = bool(
-            caption and len(caption) <= 1024 and photos and not documents
-        )
-        caption_sent = False
-
-        # Send raster photos as a single album (Telegram groups 2-10 items)
-        if photos:
-            try:
-                if len(photos) == 1:
-                    with open(photos[0].path, "rb") as f:
-                        await update.message.reply_photo(
-                            photo=f,
-                            reply_to_message_id=reply_to_message_id,
-                            caption=caption if use_caption else None,
-                            parse_mode=caption_parse_mode if use_caption else None,
-                        )
-                    caption_sent = use_caption
-                else:
-                    media = []
-                    file_handles = []
-                    for idx, img in enumerate(photos[:10]):
-                        fh = open(img.path, "rb")  # noqa: SIM115
-                        file_handles.append(fh)
-                        media.append(
-                            InputMediaPhoto(
-                                media=fh,
-                                caption=caption if use_caption and idx == 0 else None,
-                                parse_mode=(
-                                    caption_parse_mode
-                                    if use_caption and idx == 0
-                                    else None
-                                ),
-                            )
-                        )
-                    try:
-                        await update.message.chat.send_media_group(
-                            media=media,
-                            reply_to_message_id=reply_to_message_id,
-                        )
-                        caption_sent = use_caption
-                    finally:
-                        for fh in file_handles:
-                            fh.close()
-            except Exception as e:
-                logger.warning("Failed to send photo album", error=str(e))
-
-        # Send SVGs / large files as documents (one by one — can't mix in album)
-        for img in documents:
-            try:
-                with open(img.path, "rb") as f:
-                    await update.message.reply_document(
-                        document=f,
-                        filename=img.path.name,
-                        reply_to_message_id=reply_to_message_id,
-                    )
-                await asyncio.sleep(0.5)
-            except Exception as e:
-                logger.warning(
-                    "Failed to send document image",
-                    path=str(img.path),
-                    error=str(e),
-                )
-
-        return caption_sent
+        if answer_with_text(message.text):
+            logger.info(
+                "Question answered by typing",
+                user_id=update.effective_user.id if update.effective_user else None,
+            )
+            # Consumed: it was an answer, not a new request.
+            raise ApplicationHandlerStop
 
     async def _handle_ask_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1031,14 +844,35 @@ class MessageOrchestrator:
         query = update.callback_query
         if query is None or not query.data:
             return
-        from .utils.ask_user import resolve
+        from .utils.ask_user import tap
 
-        chosen = resolve(query.data)
-        if chosen is None:
-            # A keyboard from a turn that has since ended or timed out.
+        result = tap(query.data)
+        # Logged because without it a stray tap is invisible: the only trace
+        # is an answerCallbackQuery in the HTTP noise, which says a button was
+        # pressed but never which one.
+        logger.info(
+            "Question button tapped",
+            data=query.data,
+            kind=result.kind,
+            label=result.label,
+            user_id=update.effective_user.id if update.effective_user else None,
+        )
+
+        if result.kind == "closed":
             await query.answer("That question is closed.")
             return
-        await query.answer(chosen[:200])
+
+        await query.answer((result.label or "")[:200])
+
+        if result.kind == "confirm":
+            try:
+                await query.edit_message_text(
+                    result.text,
+                    parse_mode="HTML",
+                    reply_markup=result.keyboard,
+                )
+            except Exception:
+                logger.debug("ask: could not redraw the question")
 
     def _make_asker(self, update: Update):
         """A callable the tool gate can await to put a question to the user."""
@@ -1132,7 +966,6 @@ class MessageOrchestrator:
         # --- Verbose progress tracking via stream callback ---
         tool_log: List[Dict[str, Any]] = []
         start_time = time.time()
-        mcp_images: List[ImageAttachment] = []
 
         # Stream drafts (private chats only)
         draft_streamer: Optional[DraftStreamer] = None
@@ -1151,8 +984,6 @@ class MessageOrchestrator:
             tool_log,
             start_time,
             reply_markup=stop_kb,
-            mcp_images=mcp_images,
-            approved_directory=self.settings.approved_directory,
             draft_streamer=draft_streamer,
             interrupt_event=interrupt_event,
         )
@@ -1201,7 +1032,7 @@ class MessageOrchestrator:
             effort_command.bind_pending(context, claude_response.session_id)
 
             # Track directory changes
-            from .handlers.message import _update_working_directory_from_claude_response
+            from .handlers.common import _update_working_directory_from_claude_response
 
             _update_working_directory_from_claude_response(
                 claude_response, context, self.settings, user_id
@@ -1240,7 +1071,7 @@ class MessageOrchestrator:
         except Exception as e:
             success = False
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
-            from .handlers.message import _format_error_message
+            from .handlers.common import _format_error_message
             from .utils.formatting import FormattedMessage
 
             formatted_messages = [
@@ -1257,75 +1088,44 @@ class MessageOrchestrator:
 
         await self._close_progress(progress_msg)
 
-        # Use MCP-collected images (from send_image_to_user tool calls)
-        images: List[ImageAttachment] = mcp_images
-
-        # Try to combine text + images in one message when possible
-        caption_sent = False
-        if images and len(formatted_messages) == 1:
-            msg = formatted_messages[0]
-            if msg.text and len(msg.text) <= 1024:
-                try:
-                    caption_sent = await self._send_images(
-                        update,
-                        images,
-                        reply_to_message_id=update.message.message_id,
-                        caption=msg.text,
-                        caption_parse_mode=msg.parse_mode,
-                    )
-                except Exception as img_err:
-                    logger.warning("Image+caption send failed", error=str(img_err))
-
-        # Send text messages (skip if caption was already embedded in photos)
-        if not caption_sent:
-            for i, message in enumerate(formatted_messages):
-                if not message.text or not message.text.strip():
-                    continue
+        for i, message in enumerate(formatted_messages):
+            if not message.text or not message.text.strip():
+                continue
+            try:
+                await update.message.reply_text(
+                    message.text,
+                    parse_mode=message.parse_mode,
+                    reply_markup=None,  # No keyboards in agentic mode
+                    reply_to_message_id=(
+                        update.message.message_id if i == 0 else None
+                    ),
+                )
+                if i < len(formatted_messages) - 1:
+                    await asyncio.sleep(0.5)
+            except Exception as send_err:
+                logger.warning(
+                    "Failed to send HTML response, retrying as plain text",
+                    error=str(send_err),
+                    message_index=i,
+                )
                 try:
                     await update.message.reply_text(
                         message.text,
-                        parse_mode=message.parse_mode,
-                        reply_markup=None,  # No keyboards in agentic mode
+                        reply_markup=None,
                         reply_to_message_id=(
                             update.message.message_id if i == 0 else None
                         ),
                     )
-                    if i < len(formatted_messages) - 1:
-                        await asyncio.sleep(0.5)
-                except Exception as send_err:
-                    logger.warning(
-                        "Failed to send HTML response, retrying as plain text",
-                        error=str(send_err),
-                        message_index=i,
+                except Exception as plain_err:
+                    await update.message.reply_text(
+                        f"Failed to deliver response "
+                        f"(Telegram error: {str(plain_err)[:150]}). "
+                        f"Please try again.",
+                        reply_to_message_id=(
+                            update.message.message_id if i == 0 else None
+                        ),
                     )
-                    try:
-                        await update.message.reply_text(
-                            message.text,
-                            reply_markup=None,
-                            reply_to_message_id=(
-                                update.message.message_id if i == 0 else None
-                            ),
-                        )
-                    except Exception as plain_err:
-                        await update.message.reply_text(
-                            f"Failed to deliver response "
-                            f"(Telegram error: {str(plain_err)[:150]}). "
-                            f"Please try again.",
-                            reply_to_message_id=(
-                                update.message.message_id if i == 0 else None
-                            ),
-                        )
 
-            # Send images separately if caption wasn't used
-            if images:
-                try:
-                    await self._send_images(
-                        update,
-                        images,
-                        reply_to_message_id=update.message.message_id,
-                    )
-                except Exception as img_err:
-                    logger.warning("Image send failed", error=str(img_err))
 
         await self._flush_outbox(update)
 
@@ -1411,14 +1211,11 @@ class MessageOrchestrator:
 
         verbose_level = self._get_verbose_level(context)
         tool_log: List[Dict[str, Any]] = []
-        mcp_images_doc: List[ImageAttachment] = []
         on_stream = self._make_stream_callback(
             verbose_level,
             progress_msg,
             tool_log,
             time.time(),
-            mcp_images=mcp_images_doc,
-            approved_directory=self.settings.approved_directory,
         )
 
         heartbeat = self._start_typing_heartbeat(chat)
@@ -1441,7 +1238,7 @@ class MessageOrchestrator:
             model_command.bind_pending(context, claude_response.session_id)
             effort_command.bind_pending(context, claude_response.session_id)
 
-            from .handlers.message import _update_working_directory_from_claude_response
+            from .handlers.common import _update_working_directory_from_claude_response
 
             _update_working_directory_from_claude_response(
                 claude_response, context, self.settings, user_id
@@ -1459,49 +1256,23 @@ class MessageOrchestrator:
 
             await self._close_progress(progress_msg)
 
-            # Use MCP-collected images (from send_image_to_user tool calls)
-            images: List[ImageAttachment] = mcp_images_doc
+            for i, message in enumerate(formatted_messages):
+                if not message.text or not message.text.strip():
+                    continue
+                await update.message.reply_text(
+                    message.text,
+                    parse_mode=message.parse_mode,
+                    reply_markup=None,
+                    reply_to_message_id=(
+                        update.message.message_id if i == 0 else None
+                    ),
+                )
+                if i < len(formatted_messages) - 1:
+                    await asyncio.sleep(0.5)
 
-            caption_sent = False
-            if images and len(formatted_messages) == 1:
-                msg = formatted_messages[0]
-                if msg.text and len(msg.text) <= 1024:
-                    try:
-                        caption_sent = await self._send_images(
-                            update,
-                            images,
-                            reply_to_message_id=update.message.message_id,
-                            caption=msg.text,
-                            caption_parse_mode=msg.parse_mode,
-                        )
-                    except Exception as img_err:
-                        logger.warning("Image+caption send failed", error=str(img_err))
-
-            if not caption_sent:
-                for i, message in enumerate(formatted_messages):
-                    await update.message.reply_text(
-                        message.text,
-                        parse_mode=message.parse_mode,
-                        reply_markup=None,
-                        reply_to_message_id=(
-                            update.message.message_id if i == 0 else None
-                        ),
-                    )
-                    if i < len(formatted_messages) - 1:
-                        await asyncio.sleep(0.5)
-
-                if images:
-                    try:
-                        await self._send_images(
-                            update,
-                            images,
-                            reply_to_message_id=update.message.message_id,
-                        )
-                    except Exception as img_err:
-                        logger.warning("Image send failed", error=str(img_err))
 
         except Exception as e:
-            from .handlers.message import _format_error_message
+            from .handlers.common import _format_error_message
 
             await self._fail_progress(
                 progress_msg, _format_error_message(e), parse_mode="HTML"
@@ -1568,7 +1339,7 @@ class MessageOrchestrator:
             )
 
         except Exception as e:
-            from .handlers.message import _format_error_message
+            from .handlers.common import _format_error_message
 
             await self._fail_progress(
                 progress_msg, _format_error_message(e), parse_mode="HTML"
@@ -1611,7 +1382,7 @@ class MessageOrchestrator:
             )
 
         except Exception as e:
-            from .handlers.message import _format_error_message
+            from .handlers.common import _format_error_message
 
             await self._fail_progress(
                 progress_msg, _format_error_message(e), parse_mode="HTML"
@@ -1647,14 +1418,11 @@ class MessageOrchestrator:
 
         verbose_level = self._get_verbose_level(context)
         tool_log: List[Dict[str, Any]] = []
-        mcp_images_media: List[ImageAttachment] = []
         on_stream = self._make_stream_callback(
             verbose_level,
             progress_msg,
             tool_log,
             time.time(),
-            mcp_images=mcp_images_media,
-            approved_directory=self.settings.approved_directory,
         )
 
         heartbeat = self._start_typing_heartbeat(chat)
@@ -1680,7 +1448,7 @@ class MessageOrchestrator:
         model_command.bind_pending(context, claude_response.session_id)
         effort_command.bind_pending(context, claude_response.session_id)
 
-        from .handlers.message import _update_working_directory_from_claude_response
+        from .handlers.common import _update_working_directory_from_claude_response
 
         _update_working_directory_from_claude_response(
             claude_response, context, self.settings, user_id
@@ -1695,45 +1463,18 @@ class MessageOrchestrator:
         await self._close_progress(progress_msg)
 
         # Use MCP-collected images (from send_image_to_user tool calls).
-        images: List[ImageAttachment] = mcp_images_media
+        for i, message in enumerate(formatted_messages):
+            if not message.text or not message.text.strip():
+                continue
+            await update.message.reply_text(
+                message.text,
+                parse_mode=message.parse_mode,
+                reply_markup=None,
+                reply_to_message_id=(update.message.message_id if i == 0 else None),
+            )
+            if i < len(formatted_messages) - 1:
+                await asyncio.sleep(0.5)
 
-        caption_sent = False
-        if images and len(formatted_messages) == 1:
-            msg = formatted_messages[0]
-            if msg.text and len(msg.text) <= 1024:
-                try:
-                    caption_sent = await self._send_images(
-                        update,
-                        images,
-                        reply_to_message_id=update.message.message_id,
-                        caption=msg.text,
-                        caption_parse_mode=msg.parse_mode,
-                    )
-                except Exception as img_err:
-                    logger.warning("Image+caption send failed", error=str(img_err))
-
-        if not caption_sent:
-            for i, message in enumerate(formatted_messages):
-                if not message.text or not message.text.strip():
-                    continue
-                await update.message.reply_text(
-                    message.text,
-                    parse_mode=message.parse_mode,
-                    reply_markup=None,
-                    reply_to_message_id=(update.message.message_id if i == 0 else None),
-                )
-                if i < len(formatted_messages) - 1:
-                    await asyncio.sleep(0.5)
-
-            if images:
-                try:
-                    await self._send_images(
-                        update,
-                        images,
-                        reply_to_message_id=update.message.message_id,
-                    )
-                except Exception as img_err:
-                    logger.warning("Image send failed", error=str(img_err))
 
         await self._flush_outbox(update)
 

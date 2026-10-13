@@ -8,10 +8,21 @@ It works because `can_use_tool` is awaited *inside* the turn. The callback can
 post a keyboard, block on a future, and return once a button is tapped — the
 turn never ends, so the model keeps its context and carries straight on.
 
-Two things this cannot do, by construction:
+Every question carries an **Other** button, added here rather than by the
+caller: the tool's contract is that the escape hatch is always present, and
+leaving it to be remembered each time means it will sometimes be missing on
+exactly the question that needed it.
 
-*No free text.* Answering by typing would be a new message, and the handler
-for it waits on the same lock this turn is holding. Options only.
+Tapping Other does not collect text — it cannot, see below — it releases the
+turn so the model asks the same question in prose, where any answer is
+possible. One tap costs a round trip; being stuck with four wrong options
+costs more.
+
+*Typing works too.* A message sent while a question is waiting is taken as
+the answer rather than queued behind the turn — see `answer_with_text` and
+the priority path in `UpdateProcessor`. Without that bypass a typed reply
+would sit behind the very lock this turn holds, and arrive minutes later as
+a new request.
 
 *No tool result.* `can_use_tool` may allow or deny, never hand back a result.
 So the answer travels in the deny message, which the model reads as the
@@ -44,11 +55,43 @@ _TOKEN_BYTES = 4
 _MAX_OPTIONS = 12
 _MAX_LABEL = 48
 
+# Marks the always-present escape hatch, rather than an index into the options.
+# It takes two taps: the button sits in the bottom row, right above the text
+# field, so reaching for the keyboard lands on it — and a stray tap would
+# otherwise throw the question away and cost a round trip. One confirmation is
+# cheaper than that, for an action nobody takes often.
+_OTHER = "x"
+_OTHER_CONFIRM = "xx"
+OTHER_LABEL = "✏️ Other — let me type"
+_CONFIRM_LABEL = "✏️ Yes, let me type"
+# What the model is told when Other is chosen. A sentence it can act on beats
+# an empty result: the generic "could not ask" fallback reads like a failure,
+# when in fact the user answered — they said "none of these".
+OTHER_ANSWER = "Other: Ask again in plain text"
+_BACK_LABEL = "↩︎ Back to the options"
+
 
 @dataclass
 class _Pending:
     labels: List[str]
-    future: "asyncio.Future[int]" = field(repr=False)
+    # int: an option index, or -1 for Other. str: the user typed an answer.
+    future: "asyncio.Future" = field(repr=False)
+    question: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Tap:
+    """What a tapped button means, for the handler to act on.
+
+    `kind` is `answered` when the question is settled, `confirm` when the
+    keyboard should be redrawn to check the user meant Other, and `closed`
+    for a button belonging to a question that is no longer waiting.
+    """
+
+    kind: str
+    label: Optional[str] = None
+    text: Optional[str] = None
+    keyboard: Optional[InlineKeyboardMarkup] = None
 
 
 _pending: Dict[str, _Pending] = {}
@@ -71,7 +114,11 @@ def _labels_of(question: Dict[str, Any]) -> List[str]:
 
 
 def _keyboard(token: str, labels: List[str]) -> InlineKeyboardMarkup:
-    """One button per line: option labels are sentences, not words."""
+    """One button per line: option labels are sentences, not words.
+
+    The last row is always Other, so none of the offered answers can become a
+    trap when none of them fit.
+    """
     rows = [
         [
             InlineKeyboardButton(
@@ -80,6 +127,13 @@ def _keyboard(token: str, labels: List[str]) -> InlineKeyboardMarkup:
         ]
         for index, label in enumerate(labels)
     ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                OTHER_LABEL, callback_data=f"{CALLBACK_PREFIX}{token}:{_OTHER}"
+            )
+        ]
+    )
     return InlineKeyboardMarkup(rows)
 
 
@@ -105,28 +159,71 @@ def _prompt_text(question: Dict[str, Any], labels: List[str]) -> str:
     return "\n".join(lines)
 
 
-def resolve(data: str) -> Optional[str]:
-    """Settle the question a tapped button belongs to.
+def _confirm_keyboard(token: str) -> InlineKeyboardMarkup:
+    """Back on top, so the undo is the one further from the text field."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    _BACK_LABEL, callback_data=f"{CALLBACK_PREFIX}{token}:back"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    _CONFIRM_LABEL,
+                    callback_data=f"{CALLBACK_PREFIX}{token}:{_OTHER_CONFIRM}",
+                )
+            ],
+        ]
+    )
 
-    Returns the chosen label, or None when the question is already gone —
-    a stale keyboard from an earlier turn, or one that timed out.
-    """
+
+def tap(data: str) -> Tap:
+    """Interpret a tapped button against the question still waiting."""
     if not data.startswith(CALLBACK_PREFIX):
-        return None
+        return Tap("closed")
     rest = data[len(CALLBACK_PREFIX) :]
     token, _, index_text = rest.partition(":")
     waiting = _pending.get(token)
     if waiting is None:
-        return None
+        return Tap("closed")
+
+    if index_text == _OTHER:
+        return Tap(
+            "confirm",
+            label="Sure?",
+            text="❓ Answer in your own words instead?",
+            keyboard=_confirm_keyboard(token),
+        )
+
+    if index_text == "back":
+        return Tap(
+            "confirm",
+            label="Back",
+            text=_prompt_text(waiting.question, waiting.labels),
+            keyboard=_keyboard(token, waiting.labels),
+        )
+
+    if index_text == _OTHER_CONFIRM:
+        if not waiting.future.done():
+            waiting.future.set_result(-1)
+        return Tap("answered", label=OTHER_LABEL)
+
     try:
         index = int(index_text)
     except ValueError:
-        return None
+        return Tap("closed")
     if not 0 <= index < len(waiting.labels):
-        return None
+        return Tap("closed")
     if not waiting.future.done():
         waiting.future.set_result(index)
-    return waiting.labels[index]
+    return Tap("answered", label=waiting.labels[index])
+
+
+def resolve(data: str) -> Optional[str]:
+    """Settle a question from a tapped button; the chosen label, or None."""
+    result = tap(data)
+    return result.label if result.kind == "answered" else None
 
 
 async def ask(message, payload: Dict[str, Any], timeout: float = DEFAULT_TIMEOUT) -> Optional[str]:
@@ -160,7 +257,7 @@ async def _ask_one(
 ) -> Optional[str]:
     token = _token()
     loop = asyncio.get_running_loop()
-    waiting = _Pending(labels=labels, future=loop.create_future())
+    waiting = _Pending(labels=labels, future=loop.create_future(), question=question)
     _pending[token] = waiting
 
     sent = None
@@ -171,6 +268,17 @@ async def _ask_one(
             reply_markup=_keyboard(token, labels),
         )
         index = await asyncio.wait_for(waiting.future, timeout=timeout)
+        if isinstance(index, str):
+            # Typed rather than tapped: use the words as given.
+            await _close(sent, f"✏️ <b>Answered:</b> {html.escape(index)}")
+            return index
+        if index < 0:
+            # Other: none of these fit. Say so as the answer rather than
+            # returning nothing, so the model re-asks instead of guessing why
+            # its question vanished.
+            logger.info("ask_user: user chose to answer in prose", token=token)
+            await _close(sent, "✏️ Asked again in plain text.")
+            return OTHER_ANSWER
         chosen = labels[index]
     except asyncio.TimeoutError:
         logger.info("ask_user: question timed out", token=token)
@@ -194,6 +302,25 @@ async def _close(sent, text: str) -> None:
         await sent.edit_text(text, parse_mode="HTML")
     except Exception:
         logger.debug("ask_user: could not clear the keyboard")
+
+
+def answer_with_text(text: str) -> bool:
+    """Take a typed message as the answer to the waiting question.
+
+    Returns whether it was used. Only one question is ever outstanding — a
+    multi-question ask puts them one at a time — so there is no ambiguity
+    about which this belongs to.
+    """
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return False
+    for token, waiting in list(_pending.items()):
+        if waiting.future.done():
+            continue
+        waiting.future.set_result(cleaned)
+        logger.info("ask_user: answered by typing", token=token)
+        return True
+    return False
 
 
 def pending_count() -> int:

@@ -48,6 +48,19 @@ def wakes(monkeypatch):
     return install
 
 
+class _MemoryStore:
+    """Stands in for the on-disk token store."""
+
+    def __init__(self):
+        self.values = {}
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def set(self, key, value):
+        self.values[key] = value
+
+
 class FakeIndex:
     def __init__(self, info=None):
         self._info = info
@@ -88,6 +101,9 @@ def make_context(
     return SimpleNamespace(
         user_data={"claude_session_id": session_id, "current_directory": cwd},
         bot_data={
+            # Kept off the real data/ directory: the banner now remembers
+            # token counts on disk, and a stale one there would answer these.
+            "_tokens_store": _MemoryStore(),
             "settings": settings,
             "claude_integration": SimpleNamespace(session_manager=manager),
             "_session_index": FakeIndex(info),
@@ -553,3 +569,20 @@ def test_a_failing_wake_scan_does_not_break_the_banner(monkeypatch):
     header = build_header(make_context())
 
     assert "A tidy session" in header
+
+
+def test_the_context_size_survives_a_restart():
+    """user_data is memory only; the count must not fall back to a msg count."""
+    store = _MemoryStore()
+    first = make_context()
+    first.bot_data["_tokens_store"] = store
+    build_header(first, SimpleNamespace(session_id="x", cost=0.0, context_tokens=441_700))
+
+    # A fresh process: same session on disk, empty user_data.
+    after = make_context()
+    after.bot_data["_tokens_store"] = store
+    after.user_data.pop("context_tokens", None)
+
+    header = build_header(after)
+    assert "442k tok" in header
+    assert "msg" not in header

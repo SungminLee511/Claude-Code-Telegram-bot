@@ -42,15 +42,27 @@ class StopAwareUpdateProcessor(BaseUpdateProcessor):
 
     @classmethod
     def _is_priority_callback(cls, update: object) -> bool:
-        """Return True if the update is a priority callback query."""
+        """Whether this update must skip the queue.
+
+        Two kinds do. A `stop:` or `ask:` tap, because the turn holding the
+        lock is the very thing waiting on it. And a typed message while a
+        question is open, for the same reason: it *is* the answer, so making
+        it wait for the turn to end would deliver it minutes late, as a new
+        request, to a question that had already given up.
+        """
         if not isinstance(update, Update):
             return False
+
         cb = update.callback_query
-        return (
-            cb is not None
-            and cb.data is not None
-            and cb.data.startswith(cls._PRIORITY_PREFIXES)
-        )
+        if cb is not None and cb.data is not None:
+            return cb.data.startswith(cls._PRIORITY_PREFIXES)
+
+        message = update.effective_message
+        if message is not None and message.text:
+            from .utils.ask_user import pending_count
+
+            return pending_count() > 0
+        return False
 
     async def do_process_update(
         self,
