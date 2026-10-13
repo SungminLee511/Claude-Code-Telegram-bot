@@ -85,6 +85,10 @@ def _last_model(messages: List[Any]) -> Optional[str]:
     for message in reversed(messages):
         if not isinstance(message, AssistantMessage):
             continue
+        # A sub-agent's turns carry the id of the tool call that spawned them;
+        # they may run a different model and are not the one answering.
+        if getattr(message, "parent_tool_use_id", None):
+            continue
         model = getattr(message, "model", None)
         if isinstance(model, str) and model:
             return model

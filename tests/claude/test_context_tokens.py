@@ -74,3 +74,16 @@ def test_an_empty_turn_is_survivable():
 
 def test_a_non_numeric_count_is_ignored():
     assert _context_tokens([assistant(input_tokens="lots")]) is None
+
+
+def test_last_model_ignores_subagent_turns():
+    from claude_agent_sdk.types import AssistantMessage
+
+    from src.claude.sdk_integration import _last_model
+
+    main = AssistantMessage(content=[], model="claude-opus-5-5")
+    sub = AssistantMessage(
+        content=[], model="claude-haiku-5-5", parent_tool_use_id="toolu_1"
+    )
+
+    assert _last_model([main, sub]) == "claude-opus-5-5"

@@ -39,49 +39,35 @@ def bind_pending(context, session_id: Optional[str]) -> None:
     SETTING.bind_pending(context, session_id)
 
 
-def _cli_version(context) -> Optional[str]:
-    """The Claude Code this bot spawns — it decides what may be offered."""
-    settings = context.bot_data.get("settings")
-    path = getattr(settings, "claude_cli_path", None) if settings else None
-    try:
-        return models.cli_version(path)
-    except Exception as exc:
-        logger.debug("model: cli version lookup failed", error=str(exc))
-        return None
-
-
 def _listing(context) -> str:
     """The menu, marking whichever model is in force right now."""
     active = SETTING.effective(context)
-    version = _cli_version(context)
     lines = ["🧠 <b>Model</b>", ""]
-    for choice in models.available(version):
-        mark = "▸" if choice.model_id == active else " "
+    for choice in models.CHOICES:
+        mark = "▸" if choice.alias == active else " "
         lines.append(
             f"{mark} <code>{choice.alias}</code> — {html.escape(choice.note)}"
         )
-    blocked = models.unavailable(version)
-    if blocked:
-        lines.append("")
-        lines.append("<i>Not selectable on this bot:</i>")
-        for alias, reason in blocked.items():
-            lines.append(f"  <code>{alias}</code> — {html.escape(reason)}")
+    if active and active not in {c.alias for c in models.CHOICES}:
+        lines.append(f"▸ <code>{html.escape(active)}</code> — typed name")
     lines.append("")
-    lines.append("Tap one, or send <code>/model &lt;name&gt;</code>.")
+    lines.append(
+        "Tap one for the newest of that family, or send "
+        "<code>/model &lt;exact-name&gt;</code> for a specific model."
+    )
     return "\n".join(lines)
 
 
 def _keyboard(context) -> InlineKeyboardMarkup:
-    """One button per selectable model, the active one marked."""
+    """One button per family, the active one marked."""
     active = SETTING.effective(context)
-    version = _cli_version(context)
     rows = []
-    for choice in models.available(version):
-        mark = "▸ " if choice.model_id == active else ""
+    for choice in models.CHOICES:
+        mark = "▸ " if choice.alias == active else ""
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"{mark}{choice.label}", callback_data=f"model:{choice.alias}"
+                    f"{mark}{choice.alias}", callback_data=f"model:{choice.alias}"
                 )
             ]
         )
@@ -94,19 +80,19 @@ async def model_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if query is None or not query.data:
         return
     alias = query.data.split(":", 1)[1]
-    choice = models.resolve(alias, _cli_version(context))
+    choice = models.resolve(alias)
     if choice is None:
-        await query.answer("Not available on this bot.")
+        await query.answer("Unknown model.")
         return
 
-    session_id = SETTING.choose(context, choice.model_id)
-    await query.answer(f"Model: {choice.label}")
+    session_id = SETTING.choose(context, choice.alias)
+    await query.answer(f"Model: {choice.alias}")
     try:
         await query.edit_message_text(_listing(context), parse_mode="HTML",
                                       reply_markup=_keyboard(context))
     except Exception:
         logger.debug("model: could not redraw the list")
-    logger.info("Model switched by button", model=choice.model_id,
+    logger.info("Model switched by button", model=choice.alias,
                 session_id=session_id)
 
 
@@ -119,25 +105,42 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    wanted = args[0]
-    version = _cli_version(context)
-    choice = models.resolve(wanted, version)
-    if choice is None:
-        reason = models.blocked_reason(wanted, version)
-        if reason:
-            text = (
-                f"🚫 <code>{html.escape(wanted)}</code> is real but unusable here: "
-                f"{html.escape(reason)}."
+    wanted = args[0].strip()
+    checking = None
+    choice = models.resolve(wanted)
+    if choice is not None:
+        model_id, label, warning = choice.alias, choice.alias, ""
+    else:
+        if not models.is_wellformed(wanted):
+            await update.message.reply_text(
+                f"❓ <code>{html.escape(wanted[:60])}</code> is not a model name.\n\n"
+                + _listing(context),
+                parse_mode="HTML",
             )
-        else:
-            text = (
-                f"❓ No model called <code>{html.escape(wanted)}</code>.\n\n"
-                + _listing(context)
+            return
+        checking = await update.message.reply_text(
+            f"🔎 Checking <code>{html.escape(wanted)}</code>…", parse_mode="HTML"
+        )
+        settings = context.bot_data.get("settings")
+        ok, why = await models.probe(
+            wanted, getattr(settings, "claude_cli_path", None)
+        )
+        if ok is False:
+            await _say(
+                checking, update,
+                f"❌ <code>{html.escape(wanted)}</code>: {html.escape(why)}. "
+                "Model unchanged.",
             )
-        await update.message.reply_text(text, parse_mode="HTML")
-        return
+            return
+        model_id, label = wanted, models.label_for(wanted) or wanted
+        warning = (
+            f"\n⚠️ Could not verify it ({html.escape(why)}); "
+            "if the next reply errors, pick another."
+            if ok is None
+            else ""
+        )
 
-    session_id = SETTING.choose(context, choice.model_id)
+    session_id = SETTING.choose(context, model_id)
     where = (
         f"session <code>{html.escape(session_id[:8])}</code>"
         if session_id
@@ -146,11 +149,23 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     logger.info(
         "Model switched",
-        model=choice.model_id,
+        model=model_id,
         session_id=session_id,
         user_id=update.effective_user.id if update.effective_user else None,
     )
-    await update.message.reply_text(
-        f"🧠 Now <b>{html.escape(choice.label)}</b> for {where}.",
-        parse_mode="HTML",
+    await _say(
+        checking,
+        update,
+        f"🧠 Now <b>{html.escape(label)}</b> for {where}.{warning}",
     )
+
+
+async def _say(placeholder, update: Update, text: str) -> None:
+    """Edit the "Checking…" message if there is one, else reply."""
+    if placeholder is not None:
+        try:
+            await placeholder.edit_text(text, parse_mode="HTML")
+            return
+        except Exception:
+            pass
+    await update.message.reply_text(text, parse_mode="HTML")
