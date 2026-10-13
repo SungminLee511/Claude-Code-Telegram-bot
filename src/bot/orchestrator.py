@@ -43,7 +43,7 @@ from .utils.image_extractor import (
     validate_image_path,
 )
 from .utils import outbox, uploads
-from .handlers import effort_command, model_command
+from .handlers import branch_command, effort_command, model_command
 from .utils.progress_registry import ProgressRegistry
 from .utils.session_header import attach_header
 
@@ -385,6 +385,7 @@ class MessageOrchestrator:
             ("repo", self.agentic_repo),
             ("model", model_command.model_command),
             ("effort", effort_command.effort_command),
+            ("branch", branch_command.branch_command),
             ("restart", command.restart_command),
         ]
         if self.settings.enable_project_threads:
@@ -438,6 +439,29 @@ class MessageOrchestrator:
             group=10,
         )
 
+        # Question buttons. Registered before the generic handlers so a tap
+        # reaches the waiting turn as directly as possible.
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(self._handle_ask_callback),
+                pattern=r"^ask:",
+            )
+        )
+
+        # Setting pickers: /model and /effort draw tappable lists.
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(model_command.model_callback),
+                pattern=r"^model:",
+            )
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(effort_command.effort_callback),
+                pattern=r"^effort:",
+            )
+        )
+
         # Stop button callback (must be before cd: handler)
         app.add_handler(
             CallbackQueryHandler(
@@ -485,6 +509,7 @@ class MessageOrchestrator:
             ("git", command.git_command),
             ("model", model_command.model_command),
             ("effort", effort_command.effort_command),
+            ("branch", branch_command.branch_command),
             ("restart", command.restart_command),
         ]
         if self.settings.enable_project_threads:
@@ -542,6 +567,7 @@ class MessageOrchestrator:
                 BotCommand("rename", "Rename this session"),
                 BotCommand("model", "Choose the model for this session"),
                 BotCommand("effort", "Set thinking effort for this session"),
+                BotCommand("branch", "Continue on a copy, leaving this one intact"),
                 BotCommand("restart", "Restart the bot"),
             ]
             if self.settings.enable_project_threads:
@@ -565,6 +591,7 @@ class MessageOrchestrator:
                 BotCommand("git", "Git repository commands"),
                 BotCommand("model", "Choose the model for this session"),
                 BotCommand("effort", "Set thinking effort for this session"),
+                BotCommand("branch", "Continue on a copy, leaving this one intact"),
                 BotCommand("restart", "Restart the bot"),
             ]
             if self.settings.enable_project_threads:
@@ -997,6 +1024,32 @@ class MessageOrchestrator:
 
         return caption_sent
 
+    async def _handle_ask_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Settle a question a running turn is blocked on."""
+        query = update.callback_query
+        if query is None or not query.data:
+            return
+        from .utils.ask_user import resolve
+
+        chosen = resolve(query.data)
+        if chosen is None:
+            # A keyboard from a turn that has since ended or timed out.
+            await query.answer("That question is closed.")
+            return
+        await query.answer(chosen[:200])
+
+    def _make_asker(self, update: Update):
+        """A callable the tool gate can await to put a question to the user."""
+
+        async def asker(tool_input):
+            from .utils.ask_user import ask
+
+            return await ask(update.message, tool_input)
+
+        return asker
+
     async def _flush_outbox(self, update: Update) -> None:
         """Send whatever Claude left in the outbox, after its reply.
 
@@ -1108,6 +1161,10 @@ class MessageOrchestrator:
         heartbeat = self._start_typing_heartbeat(chat)
 
         success = True
+        # `/branch` arms a fork for exactly one message; take the label now so
+        # a failed turn does not leave it armed for the next one.
+        branch_label = branch_command.disarm(context)
+        branched_from = context.user_data.get("claude_session_id")
         try:
             claude_response = await claude_integration.run_command(
                 prompt=message_text,
@@ -1119,6 +1176,8 @@ class MessageOrchestrator:
                 interrupt_event=interrupt_event,
                 model=model_command.current_model_id(context),
                 effort=effort_command.current_effort(context),
+                fork_session=bool(branch_label),
+                ask_user=self._make_asker(update),
             )
 
             # New session created successfully — clear the one-shot flag
@@ -1126,6 +1185,16 @@ class MessageOrchestrator:
                 context.user_data["force_new_session"] = False
 
             context.user_data["claude_session_id"] = claude_response.session_id
+            if branch_label:
+                note = branch_command.finish(
+                    context, branch_label, branched_from,
+                    claude_response.session_id,
+                )
+                if note:
+                    try:
+                        await update.message.reply_text(note, parse_mode="HTML")
+                    except Exception:
+                        logger.debug("Branch note could not be sent")
             # A model picked before the session existed now has an id to
             # attach to.
             model_command.bind_pending(context, claude_response.session_id)

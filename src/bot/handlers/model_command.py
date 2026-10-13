@@ -15,7 +15,7 @@ import html
 from typing import Optional
 
 import structlog
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from ..utils import models
@@ -67,15 +67,56 @@ def _listing(context) -> str:
         for alias, reason in blocked.items():
             lines.append(f"  <code>{alias}</code> — {html.escape(reason)}")
     lines.append("")
-    lines.append("Send <code>/model &lt;name&gt;</code> to switch this session.")
+    lines.append("Tap one, or send <code>/model &lt;name&gt;</code>.")
     return "\n".join(lines)
+
+
+def _keyboard(context) -> InlineKeyboardMarkup:
+    """One button per selectable model, the active one marked."""
+    active = SETTING.effective(context)
+    version = _cli_version(context)
+    rows = []
+    for choice in models.available(version):
+        mark = "▸ " if choice.model_id == active else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{mark}{choice.label}", callback_data=f"model:{choice.alias}"
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(rows)
+
+
+async def model_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Switch model from a tapped button."""
+    query = update.callback_query
+    if query is None or not query.data:
+        return
+    alias = query.data.split(":", 1)[1]
+    choice = models.resolve(alias, _cli_version(context))
+    if choice is None:
+        await query.answer("Not available on this bot.")
+        return
+
+    session_id = SETTING.choose(context, choice.model_id)
+    await query.answer(f"Model: {choice.label}")
+    try:
+        await query.edit_message_text(_listing(context), parse_mode="HTML",
+                                      reply_markup=_keyboard(context))
+    except Exception:
+        logger.debug("model: could not redraw the list")
+    logger.info("Model switched by button", model=choice.model_id,
+                session_id=session_id)
 
 
 async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show the model list, or switch the current session to one of them."""
     args = context.args or []
     if not args:
-        await update.message.reply_text(_listing(context), parse_mode="HTML")
+        await update.message.reply_text(
+            _listing(context), parse_mode="HTML", reply_markup=_keyboard(context)
+        )
         return
 
     wanted = args[0]

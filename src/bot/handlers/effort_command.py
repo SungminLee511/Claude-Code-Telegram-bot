@@ -12,7 +12,7 @@ import html
 from typing import Optional
 
 import structlog
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from ..utils import efforts
@@ -51,15 +51,65 @@ def _listing(context) -> str:
             f"{mark} <code>{choice.alias}</code> — {html.escape(choice.note)}"
         )
     lines.append("")
-    lines.append("Send <code>/effort &lt;level&gt;</code> to switch this session.")
+    lines.append("Tap one, or send <code>/effort &lt;level&gt;</code>.")
     return "\n".join(lines)
+
+
+def _keyboard(context) -> InlineKeyboardMarkup:
+    """Auto first, then the levels cheapest to most thorough."""
+    active = SETTING.effective(context)
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{'▸ ' if not active else ''}auto",
+                callback_data=f"effort:{efforts.AUTO}",
+            )
+        ]
+    ]
+    for choice in efforts.CHOICES:
+        mark = "▸ " if choice.alias == active else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{mark}{choice.alias}", callback_data=f"effort:{choice.alias}"
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(rows)
+
+
+async def effort_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set effort from a tapped button."""
+    query = update.callback_query
+    if query is None or not query.data:
+        return
+    wanted = query.data.split(":", 1)[1]
+
+    if efforts.is_auto(wanted):
+        SETTING.clear(context)
+        await query.answer("Effort: auto")
+    else:
+        choice = efforts.resolve(wanted)
+        if choice is None:
+            await query.answer("No such level.")
+            return
+        SETTING.choose(context, choice.alias)
+        await query.answer(f"Effort: {choice.alias}")
+
+    try:
+        await query.edit_message_text(_listing(context), parse_mode="HTML",
+                                      reply_markup=_keyboard(context))
+    except Exception:
+        logger.debug("effort: could not redraw the list")
 
 
 async def effort_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show the effort levels, or set one for the current session."""
     args = context.args or []
     if not args:
-        await update.message.reply_text(_listing(context), parse_mode="HTML")
+        await update.message.reply_text(
+            _listing(context), parse_mode="HTML", reply_markup=_keyboard(context)
+        )
         return
 
     wanted = args[0]

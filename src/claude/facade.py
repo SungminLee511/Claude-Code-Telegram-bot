@@ -66,6 +66,8 @@ class ClaudeIntegration:
         images: Optional[List[Dict[str, str]]] = None,
         model: Optional[str] = None,
         effort: Optional[str] = None,
+        fork_session: bool = False,
+        ask_user: Optional[Any] = None,
     ) -> ClaudeResponse:
         """Run Claude Code command with full integration.
 
@@ -122,6 +124,8 @@ class ClaudeIntegration:
                     images=images,
                     model=model,
                     effort=effort,
+                    fork_session=fork_session,
+                    ask_user=ask_user,
                 )
             except (asyncio.TimeoutError, ClaudeTimeoutError):
                 # Wall-clock timeout — the session is still healthy on Claude's
@@ -173,6 +177,8 @@ class ClaudeIntegration:
                                 images=images,
                                 model=model,
                                 effort=effort,
+                                fork_session=fork_session,
+                                ask_user=ask_user,
                             )
                             logger.info(
                                 "Recovered session after subprocess kill",
@@ -262,6 +268,8 @@ class ClaudeIntegration:
         images: Optional[List[Dict[str, str]]] = None,
         model: Optional[str] = None,
         effort: Optional[str] = None,
+        fork_session: bool = False,
+        ask_user: Optional[Any] = None,
     ) -> ClaudeResponse:
         """Execute command via SDK."""
         return await self.sdk_manager.execute_command(
@@ -274,6 +282,8 @@ class ClaudeIntegration:
             images=images,
             model=model,
             effort=effort,
+            fork_session=fork_session,
+            ask_user=ask_user,
         )
 
     async def _find_resumable_session(

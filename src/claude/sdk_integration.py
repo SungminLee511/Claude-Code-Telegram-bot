@@ -232,6 +232,7 @@ def _make_can_use_tool_callback(
     security_validator: Optional[SecurityValidator],
     working_directory: Path,
     approved_directory: Path,
+    ask_user: Optional[Any] = None,
 ) -> Any:
     """Create a can_use_tool callback for SDK-level tool permission validation.
 
@@ -250,6 +251,27 @@ def _make_can_use_tool_callback(
         # Interactive tools have no Telegram equivalent. Denying with a reason
         # turns a dead call into a redirect: the model reads the message as the
         # tool result and re-asks in prose.
+        if tool_name == "AskUserQuestion" and ask_user is not None:
+            # The callback is awaited inside the turn, so the model can wait
+            # here for a button without its turn ending. The answer has to
+            # ride in a deny message: this hook may allow or refuse, never
+            # return a tool result.
+            try:
+                answer = await ask_user(tool_input)
+            except Exception as exc:
+                logger.warning("can_use_tool: asking failed", error=str(exc))
+                answer = None
+            if answer:
+                logger.info("can_use_tool answered interactive tool")
+                return PermissionResultDeny(
+                    message=(
+                        "The user answered by tapping a button:\n"
+                        f"{answer}\n"
+                        "Treat this as the result of the call and carry on."
+                    )
+                )
+            # Nobody answered; fall through to the prose instruction.
+
         if tool_name in _INTERACTIVE_TOOLS:
             logger.info("can_use_tool denied interactive tool", tool_name=tool_name)
             return PermissionResultDeny(message=_INTERACTIVE_TOOLS[tool_name])
@@ -341,6 +363,8 @@ class ClaudeSDKManager:
         images: Optional[List[Dict[str, str]]] = None,
         model: Optional[str] = None,
         effort: Optional[str] = None,
+        fork_session: bool = False,
+        ask_user: Optional[Any] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK.
 
@@ -392,6 +416,9 @@ class ClaudeSDKManager:
                 max_turns=self.config.claude_max_turns,
                 model=model or self.config.claude_model or None,
                 effort=effort or self.config.claude_effort or None,
+                # Replay the resumed history into a *new* session id instead
+                # of appending to the old one, leaving the original intact.
+                fork_session=fork_session,
                 # One Read of a screenshot exceeds the SDK's 1 MB default and
                 # kills the transport for the whole turn.
                 max_buffer_size=self.config.claude_max_buffer_mb * 1024 * 1024,
@@ -426,6 +453,7 @@ class ClaudeSDKManager:
                 security_validator=self.security_validator,
                 working_directory=working_directory,
                 approved_directory=self.config.approved_directory,
+                ask_user=ask_user,
             )
 
             # Resume previous session if we have a session_id

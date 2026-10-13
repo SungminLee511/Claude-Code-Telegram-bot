@@ -30,7 +30,10 @@ class StopAwareUpdateProcessor(BaseUpdateProcessor):
     stops -> ``run_command()`` returns -> handler finishes -> lock released.
     """
 
-    _PRIORITY_PREFIXES = ("stop:",)
+    # "ask:" belongs here for the same reason "stop:" does, only more so: the
+    # turn is *blocked* waiting for that tap, so queueing it behind the lock
+    # that turn holds would deadlock the bot until the question times out.
+    _PRIORITY_PREFIXES = ("stop:", "ask:")
 
     def __init__(self) -> None:
         # High limit so priority callbacks are never blocked by semaphore
