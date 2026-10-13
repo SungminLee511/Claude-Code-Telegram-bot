@@ -9,7 +9,7 @@ Shape (style A, as a footer):
 
     <claude's reply>
     ──────────────
-    🧵 Analyze Claude code Telegram bot repo architecture
+    Analyze Claude code Telegram bot repo architecture
        27 msg · opus-5 · auto · bot2
        5h 8%: 13:40 (38%)
        week 25%: Sun 11:00 (28%)
@@ -279,7 +279,7 @@ def build_header(context, claude_response=None) -> Optional[str]:
         bits.append(_esc(effort))
     bits.append(_esc(bot_id))
 
-    header = f"🧵 <b>{_esc(title)}</b>\n   {' · '.join(bits)}"
+    header = f"<b>{_esc(title)}</b>\n   {' · '.join(bits)}"
     usage = _usage_line()
     if usage:
         # One limit per line, each indented to sit under the detail line.

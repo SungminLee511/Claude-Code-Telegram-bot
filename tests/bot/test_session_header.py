@@ -306,7 +306,7 @@ def test_banner_is_appended_to_the_last_message_only():
     assert out[0].text == "first part"
     assert out[1].text.startswith("second part")
     assert out[1].text.rstrip().endswith("main")
-    assert "🧵" in out[1].text
+    assert "<b>" in out[1].text
 
 
 def test_banner_becomes_its_own_message_when_body_is_near_the_limit():
@@ -317,7 +317,7 @@ def test_banner_becomes_its_own_message_when_body_is_near_the_limit():
 
     assert len(out) == 2
     assert out[0].text == "y" * 4090
-    assert out[1].text.startswith("🧵")
+    assert out[1].text.startswith("<b>")
     assert all(len(m.text) <= 4096 for m in out)
 
 

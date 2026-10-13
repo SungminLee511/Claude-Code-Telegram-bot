@@ -266,7 +266,7 @@ async def sessions_command(
 def _detail_text(info: SessionInfo, current_id: Optional[str], bot_label: str) -> str:
     marker = " ⭐ <i>current</i>" if info.session_id == current_id else ""
     lines = [
-        f"🧵 <b>{_esc(info.display_name)}</b>"
+        f"<b>{_esc(info.display_name)}</b>"
         f"{_esc(_started_suffix(info))}{marker}",
         "",
         f"<code>{_esc(info.session_id)}</code>",
@@ -427,7 +427,7 @@ async def _resume_session(
 
     await query.edit_message_text(
         "▶ <b>Resumed</b>\n\n"
-        f"🧵 {_esc(info.display_name)}\n"
+        f"{_esc(info.display_name)}\n"
         f"<code>{_esc(info.session_id)}</code>\n"
         f"{info.user_turns} msg · cwd <code>{_esc(str(project_path))}</code>\n\n"
         "<i>Send a message to continue this conversation.</i>",
