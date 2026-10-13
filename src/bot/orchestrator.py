@@ -35,13 +35,15 @@ from ..config.settings import Settings
 class PrivateTopicsUnavailableError(Exception):
     pass
 from .utils.draft_streamer import DraftStreamer, generate_draft_id
+from .utils.durations import format_elapsed
 from .utils.html_format import escape_html
 from .utils.image_extractor import (
     ImageAttachment,
     should_send_as_photo,
     validate_image_path,
 )
-from .utils import uploads
+from .utils import outbox, uploads
+from .handlers import effort_command, model_command
 from .utils.progress_registry import ProgressRegistry
 from .utils.session_header import attach_header
 
@@ -120,6 +122,8 @@ _TOOL_ICONS: Dict[str, str] = {
 def _tool_icon(name: str) -> str:
     """Return emoji for a tool, with a default wrench."""
     return _TOOL_ICONS.get(name, "\U0001f527")
+
+
 
 
 @dataclass
@@ -379,6 +383,8 @@ class MessageOrchestrator:
             ("sessions", session_picker.sessions_command),
             ("verbose", self.agentic_verbose),
             ("repo", self.agentic_repo),
+            ("model", model_command.model_command),
+            ("effort", effort_command.effort_command),
             ("restart", command.restart_command),
         ]
         if self.settings.enable_project_threads:
@@ -477,6 +483,8 @@ class MessageOrchestrator:
             ("export", command.export_session),
             ("actions", command.quick_actions),
             ("git", command.git_command),
+            ("model", model_command.model_command),
+            ("effort", effort_command.effort_command),
             ("restart", command.restart_command),
         ]
         if self.settings.enable_project_threads:
@@ -524,12 +532,16 @@ class MessageOrchestrator:
         """Return bot commands appropriate for current mode."""
         if self.settings.agentic_mode:
             commands = [
+                # The menu is what you scroll before typing, so it holds the
+                # commands worth choosing from. `status`, `verbose` and `repo`
+                # still work when typed — they are hidden, not removed.
                 BotCommand("start", "Start the bot"),
                 BotCommand("new", "Start a fresh session"),
-                BotCommand("status", "Show session status"),
                 BotCommand("sessions", "Browse and switch sessions"),
-                BotCommand("verbose", "Set output verbosity (0/1/2)"),
-                BotCommand("repo", "List repos / switch workspace"),
+                # Claude's own command, forwarded through: not a bot handler.
+                BotCommand("rename", "Rename this session"),
+                BotCommand("model", "Choose the model for this session"),
+                BotCommand("effort", "Set thinking effort for this session"),
                 BotCommand("restart", "Restart the bot"),
             ]
             if self.settings.enable_project_threads:
@@ -551,6 +563,8 @@ class MessageOrchestrator:
                 BotCommand("export", "Export current session"),
                 BotCommand("actions", "Show quick actions"),
                 BotCommand("git", "Git repository commands"),
+                BotCommand("model", "Choose the model for this session"),
+                BotCommand("effort", "Set thinking effort for this session"),
                 BotCommand("restart", "Restart the bot"),
             ]
             if self.settings.enable_project_threads:
@@ -704,7 +718,7 @@ class MessageOrchestrator:
             return "Working..."
 
         elapsed = time.time() - start_time
-        lines: List[str] = [f"Working... ({elapsed:.0f}s)\n"]
+        lines: List[str] = [f"Working... ({format_elapsed(elapsed)})\n"]
 
         for entry in activity_log[-15:]:  # Show last 15 entries max
             kind = entry.get("kind", "tool")
@@ -983,6 +997,25 @@ class MessageOrchestrator:
 
         return caption_sent
 
+    async def _flush_outbox(self, update: Update) -> None:
+        """Send whatever Claude left in the outbox, after its reply.
+
+        Runs after the text so the file arrives as an attachment to an answer
+        that has already explained it, and runs on every turn — including one
+        that failed — so a file written before an error still gets out.
+        """
+        try:
+            result = await outbox.deliver(update.message)
+        except Exception as exc:  # the drop box must never break a reply
+            logger.warning("Outbox sweep failed", error=str(exc))
+            return
+        note = result.note()
+        if note:
+            try:
+                await update.message.reply_text(note)
+            except Exception:
+                logger.debug("Outbox note could not be sent")
+
     async def agentic_text(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1084,6 +1117,8 @@ class MessageOrchestrator:
                 on_stream=on_stream,
                 force_new=force_new,
                 interrupt_event=interrupt_event,
+                model=model_command.current_model_id(context),
+                effort=effort_command.current_effort(context),
             )
 
             # New session created successfully — clear the one-shot flag
@@ -1091,6 +1126,10 @@ class MessageOrchestrator:
                 context.user_data["force_new_session"] = False
 
             context.user_data["claude_session_id"] = claude_response.session_id
+            # A model picked before the session existed now has an id to
+            # attach to.
+            model_command.bind_pending(context, claude_response.session_id)
+            effort_command.bind_pending(context, claude_response.session_id)
 
             # Track directory changes
             from .handlers.message import _update_working_directory_from_claude_response
@@ -1219,6 +1258,8 @@ class MessageOrchestrator:
                 except Exception as img_err:
                     logger.warning("Image send failed", error=str(img_err))
 
+        await self._flush_outbox(update)
+
         # Audit log
         audit_logger = context.bot_data.get("audit_logger")
         if audit_logger:
@@ -1320,12 +1361,16 @@ class MessageOrchestrator:
                 session_id=session_id,
                 on_stream=on_stream,
                 force_new=force_new,
+                model=model_command.current_model_id(context),
+                effort=effort_command.current_effort(context),
             )
 
             if force_new:
                 context.user_data["force_new_session"] = False
 
             context.user_data["claude_session_id"] = claude_response.session_id
+            model_command.bind_pending(context, claude_response.session_id)
+            effort_command.bind_pending(context, claude_response.session_id)
 
             from .handlers.message import _update_working_directory_from_claude_response
 
@@ -1395,6 +1440,7 @@ class MessageOrchestrator:
             logger.error("Claude file processing failed", error=str(e), user_id=user_id)
         finally:
             heartbeat.cancel()
+            await self._flush_outbox(update)
 
     async def agentic_photo(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1552,6 +1598,8 @@ class MessageOrchestrator:
                 on_stream=on_stream,
                 force_new=force_new,
                 images=images,
+                model=model_command.current_model_id(context),
+                effort=effort_command.current_effort(context),
             )
         finally:
             heartbeat.cancel()
@@ -1560,6 +1608,8 @@ class MessageOrchestrator:
             context.user_data["force_new_session"] = False
 
         context.user_data["claude_session_id"] = claude_response.session_id
+        model_command.bind_pending(context, claude_response.session_id)
+        effort_command.bind_pending(context, claude_response.session_id)
 
         from .handlers.message import _update_working_directory_from_claude_response
 
@@ -1615,6 +1665,8 @@ class MessageOrchestrator:
                     )
                 except Exception as img_err:
                     logger.warning("Image send failed", error=str(img_err))
+
+        await self._flush_outbox(update)
 
     async def _handle_unknown_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

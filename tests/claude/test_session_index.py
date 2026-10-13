@@ -236,3 +236,74 @@ def test_get_refreshes_single_session(projects, tmp_path):
     _write_transcript(projects / "-home", sid, [_user("two")])
     assert index.get(sid).user_turns == 2
     assert index.get("not-a-session") is None
+
+
+# --- names set by hand with /rename -----------------------------------------
+
+
+def _write(tmp_path, *lines):
+    import json as _json
+
+    d = tmp_path / "projects" / "-home"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / "aaaaaaaa-1111-2222-3333-444444444444.jsonl"
+    p.write_text("\n".join(_json.dumps(x) for x in lines) + "\n")
+    return p
+
+
+def _index(tmp_path):
+    from src.claude.session_index import SessionIndex
+
+    idx = SessionIndex(cache_path=tmp_path / "cache.json")
+    idx.projects_dir = tmp_path / "projects"
+    return idx
+
+
+def _ai(name):
+    return {"type": "ai-title", "aiTitle": name}
+
+
+def _custom(name):
+    return {"type": "custom-title", "customTitle": name}
+
+
+def test_a_renamed_session_shows_its_chosen_name(tmp_path):
+    _write(tmp_path, _ai("Generated name"), _custom("telegram 마개조"))
+
+    info = _index(tmp_path).get("aaaaaaaa-1111-2222-3333-444444444444")
+
+    assert info.display_name == "telegram 마개조"
+
+
+def test_the_generated_name_is_kept_underneath(tmp_path):
+    """So clearing the custom one falls back instead of leaving nothing."""
+    _write(tmp_path, _ai("Generated name"), _custom("chosen"))
+
+    info = _index(tmp_path).get("aaaaaaaa-1111-2222-3333-444444444444")
+
+    assert info.title == "Generated name"
+
+
+def test_a_later_retitle_does_not_undo_the_rename(tmp_path):
+    """Claude rewrites ai-title as the conversation evolves."""
+    _write(tmp_path, _custom("chosen"), _ai("Something else entirely"))
+
+    info = _index(tmp_path).get("aaaaaaaa-1111-2222-3333-444444444444")
+
+    assert info.display_name == "chosen"
+
+
+def test_the_latest_rename_wins(tmp_path):
+    _write(tmp_path, _custom("first"), _custom("second"))
+
+    info = _index(tmp_path).get("aaaaaaaa-1111-2222-3333-444444444444")
+
+    assert info.display_name == "second"
+
+
+def test_an_empty_rename_falls_back_to_the_generated_name(tmp_path):
+    _write(tmp_path, _ai("Generated name"), _custom("   "))
+
+    info = _index(tmp_path).get("aaaaaaaa-1111-2222-3333-444444444444")
+
+    assert info.display_name == "Generated name"

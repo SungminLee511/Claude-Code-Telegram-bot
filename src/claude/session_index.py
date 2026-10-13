@@ -39,7 +39,7 @@ DEFAULT_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 # attachment / queue-operation records dominate the file volume. Matching on
 # raw bytes avoids decoding multi-MB lines we are about to discard anyway.
 # Whitespace-tolerant because the writer's JSON style is not guaranteed.
-_TYPE_RE = re.compile(rb'"type"\s*:\s*"(ai-title|user|assistant)"')
+_TYPE_RE = re.compile(rb'"type"\s*:\s*"(ai-title|custom-title|user|assistant)"')
 
 # Never json-parse a single line larger than this (pathological attachments).
 _MAX_LINE_BYTES = 2 * 1024 * 1024
@@ -54,6 +54,8 @@ class SessionInfo:
     session_id: str
     path: str
     title: Optional[str] = None
+    # A name set by hand with `/rename`; outranks the generated one.
+    custom_title: Optional[str] = None
     first_prompt: str = ""
     last_prompt: str = ""
     user_turns: int = 0
@@ -71,7 +73,10 @@ class SessionInfo:
 
     @property
     def display_name(self) -> str:
-        """Human label: Claude's own ai-title, else the first prompt."""
+        """Human label: a chosen name, else Claude's ai-title, else the
+        first prompt."""
+        if self.custom_title:
+            return self.custom_title
         if self.title:
             return self.title
         if self.first_prompt:
@@ -189,6 +194,17 @@ def _consume(path: Path, info: SessionInfo) -> SessionInfo:
                 title = record.get("aiTitle")
                 if isinstance(title, str) and title.strip():
                     info.title = title.strip()
+            elif rtype == "custom-title":
+                # What `/rename` writes. Kept apart from the generated title
+                # rather than overwriting it, because Claude rewrites
+                # `ai-title` as the conversation evolves and would otherwise
+                # silently undo the rename a few turns later.
+                chosen = record.get("customTitle")
+                info.custom_title = (
+                    chosen.strip()
+                    if isinstance(chosen, str) and chosen.strip()
+                    else None
+                )
             elif rtype in ("user", "assistant"):
                 cwd = record.get("cwd")
                 # First cwd wins: that is the workspace the session was

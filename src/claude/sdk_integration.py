@@ -59,6 +59,44 @@ class ClaudeResponse:
     error_type: Optional[str] = None
     tools_used: List[Dict[str, Any]] = field(default_factory=list)
     interrupted: bool = False
+    # Size of the conversation as the model last saw it. Not a running total:
+    # every turn resends the whole history, so the newest turn's input count
+    # *is* the current context size.
+    context_tokens: Optional[int] = None
+
+
+def _context_tokens(messages: List[Any]) -> Optional[int]:
+    """How much context the model was holding on its last turn.
+
+    Everything the model reads is resent on every turn, so one turn's input
+    count — prompt plus whatever was served from cache — is the size of the
+    conversation at that moment. Output tokens are left out: they are part of
+    the *next* turn's input, not this one's.
+
+    Only assistant messages are consulted. ``ResultMessage.usage`` looks like
+    the same thing but is a *total for the turn*: a turn with three tool calls
+    reports three times the cache reads, which is three times the context and
+    plainly wrong. The last assistant message is the one to ask — an earlier
+    one in the same turn had seen less of the conversation.
+    """
+    for message in reversed(messages):
+        if not isinstance(message, AssistantMessage):
+            continue
+        usage = getattr(message, "usage", None)
+        if not isinstance(usage, dict):
+            continue
+        total = 0
+        for key in (
+            "input_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ):
+            value = usage.get(key)
+            if isinstance(value, (int, float)):
+                total += int(value)
+        if total:
+            return total
+    return None
 
 
 @dataclass
@@ -301,8 +339,15 @@ class ClaudeSDKManager:
         stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
         interrupt_event: Optional[asyncio.Event] = None,
         images: Optional[List[Dict[str, str]]] = None,
+        model: Optional[str] = None,
+        effort: Optional[str] = None,
     ) -> ClaudeResponse:
-        """Execute Claude Code command via SDK."""
+        """Execute Claude Code command via SDK.
+
+        ``model`` overrides the configured one for this call only — the
+        options object is rebuilt per request, so the choice is naturally
+        per-invocation rather than process-wide.
+        """
         start_time = asyncio.get_event_loop().time()
 
         logger.info(
@@ -345,7 +390,11 @@ class ClaudeSDKManager:
             # Build Claude Agent options
             options = ClaudeAgentOptions(
                 max_turns=self.config.claude_max_turns,
-                model=self.config.claude_model or None,
+                model=model or self.config.claude_model or None,
+                effort=effort or self.config.claude_effort or None,
+                # One Read of a screenshot exceeds the SDK's 1 MB default and
+                # kills the transport for the whole turn.
+                max_buffer_size=self.config.claude_max_buffer_mb * 1024 * 1024,
                 max_budget_usd=self.config.claude_max_cost_per_request,
                 cwd=str(working_directory),
                 allowed_tools=sdk_allowed_tools,
@@ -630,6 +679,7 @@ class ClaudeSDKManager:
                 ),
                 tools_used=tools_used,
                 interrupted=interrupted,
+                context_tokens=_context_tokens(messages),
             )
 
         except asyncio.TimeoutError:

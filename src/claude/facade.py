@@ -64,8 +64,14 @@ class ClaudeIntegration:
         force_new: bool = False,
         interrupt_event: Optional["asyncio.Event"] = None,
         images: Optional[List[Dict[str, str]]] = None,
+        model: Optional[str] = None,
+        effort: Optional[str] = None,
     ) -> ClaudeResponse:
-        """Run Claude Code command with full integration."""
+        """Run Claude Code command with full integration.
+
+        ``model`` is the caller's per-session override; None keeps whatever
+        the config sets.
+        """
         logger.info(
             "Running Claude command",
             user_id=user_id,
@@ -114,6 +120,8 @@ class ClaudeIntegration:
                     stream_callback=on_stream,
                     interrupt_event=interrupt_event,
                     images=images,
+                    model=model,
+                    effort=effort,
                 )
             except (asyncio.TimeoutError, ClaudeTimeoutError):
                 # Wall-clock timeout — the session is still healthy on Claude's
@@ -163,6 +171,8 @@ class ClaudeIntegration:
                                 stream_callback=on_stream,
                                 interrupt_event=interrupt_event,
                                 images=images,
+                                model=model,
+                                effort=effort,
                             )
                             logger.info(
                                 "Recovered session after subprocess kill",
@@ -205,6 +215,8 @@ class ClaudeIntegration:
                         stream_callback=on_stream,
                         interrupt_event=interrupt_event,
                         images=images,
+                        model=model,
+                        effort=effort,
                     )
 
             # Update session (assigns real session_id for new sessions)
@@ -248,6 +260,8 @@ class ClaudeIntegration:
         stream_callback: Optional[Callable] = None,
         interrupt_event: Optional[asyncio.Event] = None,
         images: Optional[List[Dict[str, str]]] = None,
+        model: Optional[str] = None,
+        effort: Optional[str] = None,
     ) -> ClaudeResponse:
         """Execute command via SDK."""
         return await self.sdk_manager.execute_command(
@@ -258,6 +272,8 @@ class ClaudeIntegration:
             stream_callback=stream_callback,
             interrupt_event=interrupt_event,
             images=images,
+            model=model,
+            effort=effort,
         )
 
     async def _find_resumable_session(

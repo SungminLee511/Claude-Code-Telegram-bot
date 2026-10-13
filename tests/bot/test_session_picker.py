@@ -343,3 +343,75 @@ async def test_preview_renders_transcript_tail(tmp_path, monkeypatch):
     await sp.sessions_callback(make_update(query), context)
 
     assert "ping" in query.edited and "pong" in query.edited
+
+
+# --- size and start time, matching the reply banner -------------------------
+
+
+def _info(tmp_path, lines, turns=12):
+    import json as _json
+
+    from src.claude.session_index import SessionInfo
+
+    path = tmp_path / "s.jsonl"
+    path.write_text("\n".join(lines) + "\n")
+    return SessionInfo(
+        session_id="abcdef12-1111", path=str(path), title="T", user_turns=turns
+    )
+
+
+def _assistant(tokens):
+    import json as _json
+
+    return _json.dumps(
+        {"type": "assistant", "message": {"role": "assistant",
+                                          "usage": {"input_tokens": tokens}}}
+    )
+
+
+def _summary():
+    return '{"type":"user","isCompactSummary":true,"uuid":"a"}'
+
+
+def test_the_list_shows_tokens_and_compactions(tmp_path):
+    from src.bot.handlers.session_picker import _size_text
+    from src.bot.utils import compactions, transcript_stats
+
+    compactions.reset_cache()
+    transcript_stats.reset_cache()
+    info = _info(tmp_path, [_summary(), _summary(), _assistant(442_000)])
+
+    assert _size_text(info) == "442k tok (2)"
+
+
+def test_a_session_that_never_compacted_shows_only_tokens(tmp_path):
+    from src.bot.handlers.session_picker import _size_text
+    from src.bot.utils import compactions, transcript_stats
+
+    compactions.reset_cache()
+    transcript_stats.reset_cache()
+
+    assert _size_text(_info(tmp_path, [_assistant(9_000)])) == "9k tok"
+
+
+def test_an_unreadable_transcript_falls_back_to_the_turn_count(tmp_path):
+    """An entry with no second line at all would read as broken."""
+    from src.bot.handlers.session_picker import _size_text
+    from src.bot.utils import compactions, transcript_stats
+
+    compactions.reset_cache()
+    transcript_stats.reset_cache()
+    info = _info(tmp_path, ['{"type":"user"}'], turns=7)
+
+    assert _size_text(info) == "7 msg"
+
+
+def test_the_list_shows_when_the_session_started(tmp_path):
+    from src.bot.handlers.session_picker import _started_suffix
+    from src.bot.utils import session_start
+
+    session_start.reset_cache()
+    info = _info(tmp_path, ['{"timestamp":"2026-10-12T05:33:33Z"}', _assistant(1)])
+
+    # 05:33 UTC is 14:33 KST.
+    assert "14:33" in _started_suffix(info)

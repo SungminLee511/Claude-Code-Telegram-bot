@@ -84,6 +84,29 @@ class Settings(BaseSettings):
     claude_max_turns: int = Field(
         DEFAULT_CLAUDE_MAX_TURNS, description="Max conversation turns"
     )
+    claude_effort: Optional[str] = Field(
+        None,
+        # Deliberately NOT `CLAUDE_EFFORT`: the Claude CLI sets that variable
+        # in its own environment, so a bot restarted from inside a Claude
+        # session would inherit that session's effort as its default, while a
+        # bot started from a plain shell would not. Same repo, same .env, two
+        # different behaviours depending on who ran the restart.
+        validation_alias="BOT_DEFAULT_EFFORT",
+        description=(
+            "Default thinking effort (low/medium/high/xhigh/max). Unset lets "
+            "the model decide per turn, which is the right default; /effort "
+            "overrides it for one session."
+        ),
+    )
+    claude_max_buffer_mb: int = Field(
+        32,
+        description=(
+            "Largest single stream-json message accepted from the CLI, in MB. "
+            "The SDK defaults to 1 MB, which a Read of any image blows straight "
+            "through: the file comes back base64-encoded in one line, so a "
+            "600 kB PNG is a 1.2 MB message and the transport dies mid-turn."
+        ),
+    )
     claude_timeout_seconds: int = Field(
         DEFAULT_CLAUDE_TIMEOUT_SECONDS, description="Claude timeout"
     )

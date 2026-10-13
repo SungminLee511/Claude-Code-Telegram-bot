@@ -27,6 +27,7 @@ from ..utils.image_extractor import (
 )
 from ..utils import uploads
 from ..utils.session_header import attach_header
+from . import effort_command, model_command
 
 logger = structlog.get_logger()
 
@@ -395,6 +396,8 @@ async def handle_text_message(
                 session_id=session_id,
                 on_stream=stream_handler,
                 force_new=force_new,
+                model=model_command.current_model_id(context),
+                effort=effort_command.current_effort(context),
             )
 
             # New session created successfully — clear the one-shot flag
@@ -403,6 +406,8 @@ async def handle_text_message(
 
             # Update session ID
             context.user_data["claude_session_id"] = claude_response.session_id
+            model_command.bind_pending(context, claude_response.session_id)
+            effort_command.bind_pending(context, claude_response.session_id)
 
             # Check if Claude changed the working directory and update our tracking
             _update_working_directory_from_claude_response(

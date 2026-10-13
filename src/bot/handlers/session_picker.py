@@ -118,6 +118,36 @@ def _owner_text(owners: Optional[Dict[str, str]], session_id: str) -> str:
     return f"bot {owners.get(session_id, '?')}"
 
 
+def _started_suffix(info: SessionInfo) -> str:
+    """` (14:33)` — when the session began, same shape as the reply banner."""
+    from ..utils.session_header import started_suffix
+
+    return started_suffix(info)
+
+
+def _size_text(info: SessionInfo) -> str:
+    """`442k tok (3)`, the same measure the banner shows for the live session.
+
+    Falls back to the turn count when the transcript cannot be read for one,
+    since an entry with no second line at all reads as broken.
+    """
+    from ..utils.compactions import count
+    from ..utils.session_header import format_tokens
+    from ..utils.transcript_stats import context_tokens
+
+    try:
+        tokens = context_tokens(info.path)
+        compactions = count(info.path) or 0
+    except Exception as exc:  # a listing must not die over decoration
+        logger.debug("session_picker: size lookup failed", error=str(exc))
+        return f"{info.user_turns} msg"
+
+    if not tokens:
+        return f"{info.user_turns} msg"
+    suffix = f" ({compactions})" if compactions else ""
+    return f"{format_tokens(tokens)}{suffix}"
+
+
 def _page_text(
     sessions: List[SessionInfo],
     page: int,
@@ -134,9 +164,12 @@ def _page_text(
     start = page * PAGE_SIZE
     for offset, info in enumerate(sessions[start : start + PAGE_SIZE], start=1):
         marker = "⭐ " if info.session_id == current_id else ""
-        lines.append(f"<b>{offset}</b> {marker}{_esc(info.display_name[:60])}")
         lines.append(
-            f"    <code>{info.short_id}</code> · {info.user_turns} msg · "
+            f"<b>{offset}</b> {marker}{_esc(info.display_name[:60])}"
+            f"{_esc(_started_suffix(info))}"
+        )
+        lines.append(
+            f"    {_size_text(info)} · "
             f"{info.size_text()} · {info.age_text()} · "
             f"{_esc(_owner_text(owners, info.session_id))}"
         )
@@ -233,10 +266,11 @@ async def sessions_command(
 def _detail_text(info: SessionInfo, current_id: Optional[str], bot_label: str) -> str:
     marker = " ⭐ <i>current</i>" if info.session_id == current_id else ""
     lines = [
-        f"🧵 <b>{_esc(info.display_name)}</b>{marker}",
+        f"🧵 <b>{_esc(info.display_name)}</b>"
+        f"{_esc(_started_suffix(info))}{marker}",
         "",
         f"<code>{_esc(info.session_id)}</code>",
-        f"{info.user_turns} msg · {info.size_text()} · {info.age_text()}",
+        f"{_size_text(info)} · {info.size_text()} · {info.age_text()}",
         f"cwd <code>{_esc(info.cwd or '?')}</code> · {bot_label}",
     ]
     if info.last_prompt:

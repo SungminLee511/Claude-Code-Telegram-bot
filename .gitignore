@@ -148,3 +148,8 @@ sessions/
 backups/
 uploads/
 config/mcp.json
+# Claude Code CLI binaries fetched for model support (hundreds of MB)
+cli/
+
+# Files Claude leaves for the user; swept into the chat and deleted
+outbox/
