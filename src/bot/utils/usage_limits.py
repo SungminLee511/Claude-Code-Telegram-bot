@@ -181,7 +181,9 @@ def fetch(path: Path = CREDENTIALS_PATH) -> Usage:
         with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except Exception as exc:  # network, auth, malformed body — all the same here
-        logger.debug("usage_limits: fetch failed", error=str(exc))
+        # Warning, not debug: a 429 here silently blanks the banner and the
+        # live bar, and without a log line nobody can tell why.
+        logger.warning("usage_limits: fetch failed", error=str(exc))
         return Usage()
 
     if not isinstance(payload, dict):
@@ -195,6 +197,14 @@ def fetch(path: Path = CREDENTIALS_PATH) -> Usage:
     )
 
 
+# A failed answer is retried soon instead of being trusted for a whole cache
+# period, and the last good answer stands in for it for a while: one 429 should
+# not blank the banner and the bar for minutes.
+_FAILURE_RETRY_SECONDS = 15.0
+_STALE_OK_SECONDS = 30 * 60.0
+_last_good: Optional[Tuple[float, Usage]] = None
+
+
 def current(
     path: Path = CREDENTIALS_PATH,
     now: Optional[float] = None,
@@ -202,45 +212,36 @@ def current(
 ) -> Usage:
     """The cached usage, refetched when the cache is older than `max_age`.
 
-    A failed fetch is cached too, briefly: if the token is gone, every message
-    would otherwise pay the timeout again.
+    A failed fetch is cached only briefly, so a transient error (a 429, a
+    timeout) is retried in seconds rather than minutes. While it keeps
+    failing, the last good answer is served if it is under half an hour old.
     """
-    global _cache
+    global _cache, _last_good
     now = time.time() if now is None else now
-    if _cache is not None and now - _cache[0] < max_age:
-        return _cache[1]
+    if _cache is not None:
+        age = now - _cache[0]
+        limit = max_age if _cache[1].known else min(max_age, _FAILURE_RETRY_SECONDS)
+        if age < limit:
+            return _cache[1]
     usage = fetch(path)
+    if usage.known:
+        _last_good = (now, usage)
+    elif _last_good is not None and now - _last_good[0] < _STALE_OK_SECONDS:
+        usage = _last_good[1]
+        # Looks like a failure to the cache (so it is retried soon) only if
+        # nothing is known; here something is, so cache it as an answer but
+        # for the short retry window.
+        _cache = (now - max_age + _FAILURE_RETRY_SECONDS, usage)
+        return usage
     _cache = (now, usage)
     return usage
 
 
-def five_hour_percent(max_age: float = 295.0) -> Optional[float]:
-    """The five-hour spend, 0-100, no older than `max_age` seconds, or None.
-
-    For the live bar under a running request, which cannot use the banner's
-    one-minute cache. Blocking (a short HTTP call): run it in a thread.
-    """
-    try:
-        return current(max_age=max_age).five_hour
-    except Exception as exc:  # decoration must never cost a reply
-        logger.debug("usage_limits: five_hour_percent failed", error=str(exc))
-        return None
-
-
-BAR_CELLS = 10
-
-
-def bar(percent: float) -> str:
-    """`▰▰▰▱▱▱▱▱▱▱ 31%` — ten cells, filled to the nearest tenth."""
-    clamped = max(0.0, min(100.0, percent))
-    filled = round(clamped / 100 * BAR_CELLS)
-    return f"{'▰' * filled}{'▱' * (BAR_CELLS - filled)} {clamped:.0f}%"
-
-
 def reset_cache() -> None:
     """Forget the cached answer — for tests, and after an auth change."""
-    global _cache
+    global _cache, _last_good
     _cache = None
+    _last_good = None
 
 
 def _clock(unix_seconds: float, with_weekday: bool) -> str:

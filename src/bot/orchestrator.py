@@ -33,7 +33,7 @@ from ..config.settings import Settings
 from .utils.draft_streamer import DraftStreamer, generate_draft_id
 from .utils.durations import format_elapsed
 from .utils.html_format import escape_html
-from .utils import outbox, uploads, usage_limits
+from .utils import outbox, uploads
 from .handlers import branch_command, effort_command, model_command
 from .utils.progress_registry import ProgressRegistry
 from .utils.session_header import attach_header
@@ -446,24 +446,8 @@ class MessageOrchestrator:
         activity_log: List[Dict[str, Any]],
         verbose_level: int,
         start_time: float,
-        five_hour: Optional[float] = None,
     ) -> str:
-        """Build the progress message text based on activity so far.
-
-        `five_hour` is the live five-hour spend; when known it is shown as a
-        bar under everything else.
-        """
-        text = self._progress_body(activity_log, verbose_level, start_time)
-        if five_hour is None:
-            return text
-        return f"{text}\n\n5h {usage_limits.bar(five_hour)}"
-
-    def _progress_body(
-        self,
-        activity_log: List[Dict[str, Any]],
-        verbose_level: int,
-        start_time: float,
-    ) -> str:
+        """Build the progress message text based on activity so far."""
         if not activity_log:
             return "Working..."
 
@@ -548,50 +532,6 @@ class MessageOrchestrator:
 
         return asyncio.create_task(_heartbeat())
 
-    def _start_usage_ticker(
-        self,
-        progress_msg: Any,
-        tool_log: List[Dict[str, Any]],
-        verbose_level: int,
-        start_time: float,
-        usage_state: Dict[str, Any],
-        reply_markup: Optional[InlineKeyboardMarkup] = None,
-        interrupt_event: Optional[asyncio.Event] = None,
-    ) -> "asyncio.Task[None]":
-        """Keep the progress message's five-hour bar fresh while a request runs.
-
-        Stream events only arrive when Claude does something, so a long tool
-        call or a long think would freeze the bar. This polls on its own clock
-        (every 5 minutes: the usage endpoint rate-limits faster polling) and redraws the
-        message when its text changed. A failed poll keeps the last good value.
-        """
-
-        async def _tick() -> None:
-            last_text: Optional[str] = None
-            try:
-                while True:
-                    pct = await asyncio.to_thread(usage_limits.five_hour_percent)
-                    if pct is not None:
-                        usage_state["pct"] = pct
-                    stopped = interrupt_event is not None and interrupt_event.is_set()
-                    if usage_state.get("pct") is not None and not stopped:
-                        text = self._format_verbose_progress(
-                            tool_log, verbose_level, start_time, usage_state["pct"]
-                        )
-                        if text != last_text:
-                            last_text = text
-                            try:
-                                await progress_msg.edit_text(
-                                    text, reply_markup=reply_markup
-                                )
-                            except Exception:
-                                pass
-                    await asyncio.sleep(300)
-            except asyncio.CancelledError:
-                pass
-
-        return asyncio.create_task(_tick())
-
     def _make_stream_callback(
         self,
         verbose_level: int,
@@ -601,7 +541,6 @@ class MessageOrchestrator:
         reply_markup: Optional[InlineKeyboardMarkup] = None,
         draft_streamer: Optional[DraftStreamer] = None,
         interrupt_event: Optional[asyncio.Event] = None,
-        usage_state: Optional[Dict[str, Any]] = None,
     ) -> Optional[Callable[[StreamUpdate], Any]]:
         """Create a stream callback for verbose progress updates.
 
@@ -664,10 +603,7 @@ class MessageOrchestrator:
                 if (now - last_edit_time[0]) >= 2.0 and tool_log:
                     last_edit_time[0] = now
                     new_text = self._format_verbose_progress(
-                        tool_log,
-                        verbose_level,
-                        start_time,
-                        (usage_state or {}).get("pct"),
+                        tool_log, verbose_level, start_time
                     )
                     try:
                         await progress_msg.edit_text(
@@ -829,7 +765,6 @@ class MessageOrchestrator:
 
         # --- Verbose progress tracking via stream callback ---
         tool_log: List[Dict[str, Any]] = []
-        usage_state: Dict[str, Any] = {}
         start_time = time.time()
 
         # Stream drafts (private chats only)
@@ -851,15 +786,10 @@ class MessageOrchestrator:
             reply_markup=stop_kb,
             draft_streamer=draft_streamer,
             interrupt_event=interrupt_event,
-            usage_state=usage_state,
         )
 
         # Independent typing heartbeat — stays alive even with no stream events
         heartbeat = self._start_typing_heartbeat(chat)
-        usage_ticker = self._start_usage_ticker(
-            progress_msg, tool_log, verbose_level, start_time, usage_state,
-            reply_markup=stop_kb, interrupt_event=interrupt_event,
-        )
 
         success = True
         # `/branch` arms a fork for exactly one message; take the label now so
@@ -949,7 +879,6 @@ class MessageOrchestrator:
             ]
         finally:
             heartbeat.cancel()
-            usage_ticker.cancel()
             self._active_requests.pop(user_id, None)
             if draft_streamer:
                 try:
@@ -1082,20 +1011,14 @@ class MessageOrchestrator:
 
         verbose_level = self._get_verbose_level(context)
         tool_log: List[Dict[str, Any]] = []
-        usage_state: Dict[str, Any] = {}
-        started = time.time()
         on_stream = self._make_stream_callback(
             verbose_level,
             progress_msg,
             tool_log,
-            started,
-            usage_state=usage_state,
+            time.time(),
         )
 
         heartbeat = self._start_typing_heartbeat(chat)
-        usage_ticker = self._start_usage_ticker(
-            progress_msg, tool_log, verbose_level, started, usage_state
-        )
         try:
             claude_response = await claude_integration.run_command(
                 prompt=prompt,
@@ -1157,7 +1080,6 @@ class MessageOrchestrator:
             logger.error("Claude file processing failed", error=str(e), user_id=user_id)
         finally:
             heartbeat.cancel()
-            usage_ticker.cancel()
             await self._flush_outbox(update)
 
     async def agentic_photo(
@@ -1296,20 +1218,14 @@ class MessageOrchestrator:
 
         verbose_level = self._get_verbose_level(context)
         tool_log: List[Dict[str, Any]] = []
-        usage_state: Dict[str, Any] = {}
-        started = time.time()
         on_stream = self._make_stream_callback(
             verbose_level,
             progress_msg,
             tool_log,
-            started,
-            usage_state=usage_state,
+            time.time(),
         )
 
         heartbeat = self._start_typing_heartbeat(chat)
-        usage_ticker = self._start_usage_ticker(
-            progress_msg, tool_log, verbose_level, started, usage_state
-        )
         try:
             claude_response = await claude_integration.run_command(
                 prompt=prompt,
@@ -1324,7 +1240,6 @@ class MessageOrchestrator:
             )
         finally:
             heartbeat.cancel()
-            usage_ticker.cancel()
 
         if force_new:
             context.user_data["force_new_session"] = False

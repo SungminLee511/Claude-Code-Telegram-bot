@@ -379,33 +379,53 @@ def test_the_banner_line_is_the_rendered_usage(creds, endpoint):
     assert third.startswith("Fable 0%")
 
 
-def test_bar_fills_to_the_nearest_tenth():
+def test_a_failed_fetch_is_retried_soon_and_serves_the_last_good(monkeypatch):
     from src.bot.utils import usage_limits as u
 
-    assert u.bar(0) == "▱▱▱▱▱▱▱▱▱▱ 0%"
-    assert u.bar(31) == "▰▰▰▱▱▱▱▱▱▱ 31%"
-    assert u.bar(100) == "▰▰▰▰▰▰▰▰▰▰ 100%"
-    assert u.bar(140) == "▰▰▰▰▰▰▰▰▰▰ 100%"
-    assert u.bar(-5) == "▱▱▱▱▱▱▱▱▱▱ 0%"
-
-
-def test_five_hour_percent_refetches_when_older_than_max_age(monkeypatch):
-    from src.bot.utils import usage_limits as u
-
+    answers = [u.Usage(five_hour=40.0), u.Usage(), u.Usage(five_hour=45.0)]
     calls = []
 
     def fake_fetch(path=u.CREDENTIALS_PATH):
         calls.append(1)
-        return u.Usage(five_hour=float(len(calls)))
+        return answers[len(calls) - 1]
 
     u.reset_cache()
     monkeypatch.setattr(u, "fetch", fake_fetch)
     now = [1000.0]
     monkeypatch.setattr(u.time, "time", lambda: now[0])
 
-    assert u.five_hour_percent(max_age=5) == 1.0
-    now[0] += 3
-    assert u.five_hour_percent(max_age=5) == 1.0  # still fresh
-    now[0] += 3
-    assert u.five_hour_percent(max_age=5) == 2.0  # 6s old -> refetched
+    assert u.current(max_age=60).five_hour == 40.0
+    now[0] += 61
+    # The refetch fails: the last good number stands in, not "unknown".
+    assert u.current(max_age=60).five_hour == 40.0
+    assert len(calls) == 2
+    # Within the retry window the failure is not hammered...
+    now[0] += 5
+    assert u.current(max_age=60).five_hour == 40.0
+    assert len(calls) == 2
+    # ...but shortly after it is retried, long before max_age.
+    now[0] += 12
+    assert u.current(max_age=60).five_hour == 45.0
+    assert len(calls) == 3
+    u.reset_cache()
+
+
+def test_with_nothing_good_yet_a_failure_is_unknown_and_retried_soon(monkeypatch):
+    from src.bot.utils import usage_limits as u
+
+    answers = [u.Usage(), u.Usage(five_hour=10.0)]
+    calls = []
+
+    def fake_fetch(path=u.CREDENTIALS_PATH):
+        calls.append(1)
+        return answers[len(calls) - 1]
+
+    u.reset_cache()
+    monkeypatch.setattr(u, "fetch", fake_fetch)
+    now = [1000.0]
+    monkeypatch.setattr(u.time, "time", lambda: now[0])
+
+    assert u.current(max_age=295).five_hour is None
+    now[0] += 16  # far less than 295s
+    assert u.current(max_age=295).five_hour == 10.0
     u.reset_cache()
