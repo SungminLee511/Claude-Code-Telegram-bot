@@ -76,14 +76,6 @@ def _build_synthetic_update_payload(chat_id: int, text: str,
     }
 
 
-def _patch_message_replies(msg, bot) -> None:
-    """No-op for now. The fix for `reply_to_message_id` failures on synthetic
-    messages is handled globally by setting `reply_quote=False` in settings
-    (telegram_bot/.env), which sets `Defaults(do_quote=False)` so reply_text
-    no longer auto-attaches reply_to_message_id."""
-    return None
-
-
 def _claim_file(path: Path) -> Optional[str]:
     """Atomically claim a wake file by reading then renaming it.
 

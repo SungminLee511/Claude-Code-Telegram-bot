@@ -9,10 +9,6 @@ class ConfigurationError(ClaudeCodeTelegramError):
     """Configuration-related errors."""
 
 
-class MissingConfigError(ConfigurationError):
-    """Required configuration is missing."""
-
-
 class InvalidConfigError(ConfigurationError):
     """Configuration is invalid."""
 
@@ -23,14 +19,6 @@ class SecurityError(ClaudeCodeTelegramError):
 
 class AuthenticationError(SecurityError):
     """Authentication failed."""
-
-
-class AuthorizationError(SecurityError):
-    """Authorization failed."""
-
-
-class DirectoryTraversalError(SecurityError):
-    """Directory traversal attempt detected."""
 
 
 class ClaudeError(ClaudeCodeTelegramError):
@@ -49,24 +37,8 @@ class ClaudeParsingError(ClaudeError):
     """Failed to parse Claude Code output."""
 
 
-class StorageError(ClaudeCodeTelegramError):
-    """Storage-related errors."""
-
-
-class DatabaseConnectionError(StorageError):
-    """Database connection failed."""
-
-
-class DataIntegrityError(StorageError):
-    """Data integrity check failed."""
-
-
 class TelegramError(ClaudeCodeTelegramError):
     """Telegram API-related errors."""
-
-
-class MessageTooLongError(TelegramError):
-    """Message exceeds Telegram's length limit."""
 
 
 class RateLimitError(TelegramError):

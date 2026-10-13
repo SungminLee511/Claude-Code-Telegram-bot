@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import signal
-from typing import Optional
 
 import structlog
 from telegram import Update
