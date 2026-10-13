@@ -22,7 +22,6 @@ from src.utils.constants import (
     DEFAULT_CLAUDE_TIMEOUT_SECONDS,
     DEFAULT_DATABASE_URL,
     DEFAULT_MAX_SESSIONS_PER_USER,
-    DEFAULT_PROJECT_THREADS_SYNC_ACTION_INTERVAL_SECONDS,
     DEFAULT_RATE_LIMIT_BURST,
     DEFAULT_RATE_LIMIT_REQUESTS,
     DEFAULT_RATE_LIMIT_WINDOW,
@@ -68,9 +67,6 @@ class Settings(BaseSettings):
     )
 
     # Claude settings
-    claude_binary_path: Optional[str] = Field(
-        None, description="Path to Claude CLI binary (deprecated)"
-    )
     claude_cli_path: Optional[str] = Field(
         None, description="Path to Claude CLI executable"
     )
@@ -204,12 +200,6 @@ class Settings(BaseSettings):
     session_timeout_hours: int = Field(
         DEFAULT_SESSION_TIMEOUT_HOURS, description="Session timeout"
     )
-    session_timeout_minutes: int = Field(
-        default=120,
-        description="Session timeout in minutes",
-        ge=10,
-        le=1440,  # Max 24 hours
-    )
     max_sessions_per_user: int = Field(
         DEFAULT_MAX_SESSIONS_PER_USER, description="Max concurrent sessions"
     )
@@ -219,7 +209,6 @@ class Settings(BaseSettings):
     mcp_config_path: Optional[Path] = Field(
         None, description="MCP configuration file path"
     )
-    enable_git_integration: bool = Field(True, description="Enable git commands")
     enable_file_uploads: bool = Field(True, description="Enable file upload handling")
     enable_voice_messages: bool = Field(
         True, description="Enable voice message transcription"
@@ -265,7 +254,6 @@ class Settings(BaseSettings):
             "Named models resolve to ~/.cache/whisper-cpp/ggml-{name}.bin"
         ),
     )
-    enable_quick_actions: bool = Field(True, description="Enable quick action buttons")
     session_header: bool = Field(
         True,
         description=(
@@ -309,8 +297,6 @@ class Settings(BaseSettings):
 
     # Monitoring
     log_level: str = Field("INFO", description="Logging level")
-    enable_telemetry: bool = Field(False, description="Enable anonymous telemetry")
-    sentry_dsn: Optional[str] = Field(None, description="Sentry DSN for error tracking")
 
     # Multi-bot isolation
     bot_id: str = Field(
@@ -335,46 +321,11 @@ class Settings(BaseSettings):
     webhook_port: int = Field(8443, description="Webhook port")
     webhook_path: str = Field("/webhook", description="Webhook path")
 
-    # Agentic platform settings
-    enable_api_server: bool = Field(False, description="Enable FastAPI webhook server")
-    api_server_port: int = Field(8080, description="Webhook API server port")
-    enable_scheduler: bool = Field(False, description="Enable job scheduler")
-    github_webhook_secret: Optional[str] = Field(
-        None, description="GitHub webhook HMAC secret"
-    )
-    webhook_api_secret: Optional[str] = Field(
-        None, description="Shared secret for generic webhook providers"
-    )
-    notification_chat_ids: Optional[List[int]] = Field(
-        None, description="Default Telegram chat IDs for proactive notifications"
-    )
-    enable_project_threads: bool = Field(
-        False,
-        description="Enable strict routing by Telegram forum project threads",
-    )
-    project_threads_mode: Literal["private", "group"] = Field(
-        "private",
-        description="Project thread mode: private chat topics or group forum topics",
-    )
-    project_threads_chat_id: Optional[int] = Field(
-        None, description="Telegram forum chat ID where project topics are managed"
-    )
-    projects_config_path: Optional[Path] = Field(
-        None, description="Path to YAML project registry for thread mode"
-    )
-    project_threads_sync_action_interval_seconds: float = Field(
-        DEFAULT_PROJECT_THREADS_SYNC_ACTION_INTERVAL_SECONDS,
-        description=(
-            "Minimum delay between Telegram API calls during project topic sync"
-        ),
-        ge=0.0,
-    )
-
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
     )
 
-    @field_validator("allowed_users", "notification_chat_ids", mode="before")
+    @field_validator("allowed_users", mode="before")
     @classmethod
     def parse_int_list(cls, v: Any) -> Optional[List[int]]:
         """Parse comma-separated integer lists."""
@@ -447,34 +398,6 @@ class Settings(BaseSettings):
             )
         return v  # type: ignore[no-any-return]
 
-    @field_validator("projects_config_path", mode="before")
-    @classmethod
-    def validate_projects_config_path(cls, v: Any) -> Optional[Path]:
-        """Validate projects config path if provided."""
-        if not v:
-            return None
-        if isinstance(v, str):
-            value = v.strip()
-            if not value:
-                return None
-            v = Path(value)
-        if not v.exists():
-            raise ValueError(f"Projects config file does not exist: {v}")
-        if not v.is_file():
-            raise ValueError(f"Projects config path is not a file: {v}")
-        return v  # type: ignore[no-any-return]
-
-    @field_validator("project_threads_mode", mode="before")
-    @classmethod
-    def validate_project_threads_mode(cls, v: Any) -> str:
-        """Validate project thread mode."""
-        if v is None:
-            return "private"
-        mode = str(v).strip().lower()
-        if mode not in {"private", "group"}:
-            raise ValueError("project_threads_mode must be one of ['private', 'group']")
-        return mode
-
     @field_validator("voice_provider", mode="before")
     @classmethod
     def validate_voice_provider(cls, v: Any) -> str:
@@ -487,21 +410,6 @@ class Settings(BaseSettings):
                 "voice_provider must be one of ['mistral', 'openai', 'local']"
             )
         return provider
-
-    @field_validator("project_threads_chat_id", mode="before")
-    @classmethod
-    def validate_project_threads_chat_id(cls, v: Any) -> Optional[int]:
-        """Allow empty chat ID for private mode by treating blank values as None."""
-        if v is None:
-            return None
-        if isinstance(v, str):
-            value = v.strip()
-            if not value:
-                return None
-            return int(value)
-        if isinstance(v, int):
-            return v
-        return v  # type: ignore[no-any-return]
 
     @field_validator("log_level")
     @classmethod
@@ -533,20 +441,6 @@ class Settings(BaseSettings):
         if self.enable_mcp and not self.mcp_config_path:
             raise ValueError("mcp_config_path required when enable_mcp is True")
 
-        if self.enable_project_threads:
-            if (
-                self.project_threads_mode == "group"
-                and self.project_threads_chat_id is None
-            ):
-                raise ValueError(
-                    "project_threads_chat_id required when "
-                    "project_threads_mode is 'group'"
-                )
-            if not self.projects_config_path:
-                raise ValueError(
-                    "projects_config_path required when enable_project_threads is True"
-                )
-
         return self
 
     @property
@@ -571,21 +465,9 @@ class Settings(BaseSettings):
         return Path(self.inject_dir) / self.bot_id
 
     @property
-    def relay_state_path(self) -> Path:
-        """Per-bot relay kill-switch state file."""
-        return Path("/tmp") / f"claude_relay_state_{self.bot_id}.json"
-
-    @property
     def telegram_token_str(self) -> str:
         """Get Telegram token as string."""
         return self.telegram_bot_token.get_secret_value()
-
-    @property
-    def auth_secret_str(self) -> Optional[str]:
-        """Get auth token secret as string."""
-        if self.auth_token_secret:
-            return self.auth_token_secret.get_secret_value()
-        return None
 
     @property
     def anthropic_api_key_str(self) -> Optional[str]:

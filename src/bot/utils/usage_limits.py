@@ -21,6 +21,7 @@ token, a sulking network — each simply means no usage line this time.
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.request
 from dataclasses import dataclass, field
@@ -32,7 +33,23 @@ import structlog
 
 logger = structlog.get_logger()
 
-CREDENTIALS_PATH = Path("/root/.claude/.credentials.json")
+
+def _default_credentials_path() -> Path:
+    """Where the CLI's OAuth credentials live for whoever is running the bot.
+
+    An explicit `CLAUDE_CREDENTIALS_PATH` wins — some setups keep this file
+    outside `$HOME` or want to point at a different account for testing.
+    Otherwise it is `~/.claude/.credentials.json`, same place the CLI writes
+    it. A previous version hardcoded `/root/.claude/...` and so the usage line
+    silently went missing for any bot not running as root.
+    """
+    override = os.environ.get("CLAUDE_CREDENTIALS_PATH")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".claude" / ".credentials.json"
+
+
+CREDENTIALS_PATH = _default_credentials_path()
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 _TIMEOUT = 5.0

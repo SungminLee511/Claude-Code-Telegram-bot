@@ -381,15 +381,6 @@ class ClaudeIntegration:
         """Clean up expired sessions."""
         return await self.session_manager.cleanup_expired_sessions()
 
-    async def get_user_summary(self, user_id: int) -> Dict[str, Any]:
-        """Get comprehensive user summary."""
-        session_summary = await self.session_manager.get_user_session_summary(user_id)
-
-        return {
-            "user_id": user_id,
-            **session_summary,
-        }
-
     async def shutdown(self) -> None:
         """Shutdown integration and cleanup resources."""
         logger.info("Shutting down Claude integration")

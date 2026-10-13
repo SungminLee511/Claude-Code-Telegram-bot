@@ -111,14 +111,22 @@ def label_for(model_id: Optional[str]) -> Optional[str]:
     """Short display name for a model id, for the banner.
 
     An id set in the env but absent from the list still gets shown — the point
-    is to report what is running, not to validate it.
+    is to report what is running, not to validate it. A trailing snapshot date
+    (``-20250929``) is dropped: it adds noise without telling a human anything
+    they can act on, and when the SDK reports the full dated id as a fallback
+    the banner shouldn't suddenly double in width because of it.
     """
     if not model_id:
         return None
     choice = _BY_ID.get(model_id)
     if choice:
         return choice.label
-    return model_id.replace("claude-", "")
+    trimmed = model_id.replace("claude-", "")
+    # Trailing `-YYYYMMDD`; eight digits is unambiguous enough to be safe.
+    tail = trimmed.rsplit("-", 1)[-1]
+    if len(tail) == 8 and tail.isdigit():
+        trimmed = trimmed[: -(len(tail) + 1)]
+    return trimmed
 
 
 # --- which CLI is this bot actually running ---------------------------------

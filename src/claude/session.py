@@ -58,36 +58,6 @@ class ClaudeSession:
                 if tool_name and tool_name not in self.tools_used:
                     self.tools_used.append(tool_name)
 
-    def to_dict(self) -> Dict:
-        """Convert session to dictionary for storage."""
-        return {
-            "session_id": self.session_id,
-            "user_id": self.user_id,
-            "project_path": str(self.project_path),
-            "created_at": self.created_at.isoformat(),
-            "last_used": self.last_used.isoformat(),
-            "total_cost": self.total_cost,
-            "total_turns": self.total_turns,
-            "message_count": self.message_count,
-            "tools_used": self.tools_used,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict) -> "ClaudeSession":
-        """Create session from dictionary."""
-        return cls(
-            session_id=data["session_id"],
-            user_id=data["user_id"],
-            project_path=Path(data["project_path"]),
-            created_at=_to_utc(datetime.fromisoformat(data["created_at"])),
-            last_used=_to_utc(datetime.fromisoformat(data["last_used"])),
-            total_cost=data.get("total_cost", 0.0),
-            total_turns=data.get("total_turns", 0),
-            message_count=data.get("message_count", 0),
-            tools_used=data.get("tools_used", []),
-        )
-
-
 class SessionStorage:
     """Abstract base class for session storage."""
 
@@ -286,21 +256,3 @@ class SessionManager:
 
         return None
 
-    async def get_user_session_summary(self, user_id: int) -> Dict:
-        """Get summary of user's sessions."""
-        sessions = await self._get_user_sessions(user_id)
-
-        total_cost = sum(s.total_cost for s in sessions)
-        total_messages = sum(s.message_count for s in sessions)
-        active_sessions = [
-            s for s in sessions if not s.is_expired(self.config.session_timeout_hours)
-        ]
-
-        return {
-            "user_id": user_id,
-            "total_sessions": len(sessions),
-            "active_sessions": len(active_sessions),
-            "total_cost": total_cost,
-            "total_messages": total_messages,
-            "projects": list(set(str(s.project_path) for s in sessions)),
-        }

@@ -30,9 +30,6 @@ from telegram.ext import (
 
 from ..claude.sdk_integration import StreamUpdate
 from ..config.settings import Settings
-# Projects module removed - stub exception
-class PrivateTopicsUnavailableError(Exception):
-    pass
 from .utils.draft_streamer import DraftStreamer, generate_draft_id
 from .utils.durations import format_elapsed
 from .utils.html_format import escape_html
@@ -192,171 +189,9 @@ class MessageOrchestrator:
             for key, value in self.deps.items():
                 context.bot_data[key] = value
             context.bot_data["settings"] = self.settings
-            context.user_data.pop("_thread_context", None)
-
-            is_sync_bypass = handler.__name__ == "sync_threads"
-            is_start_bypass = handler.__name__ in {"start_command", "agentic_start"}
-            message_thread_id = self._extract_message_thread_id(update)
-            should_enforce = self.settings.enable_project_threads
-
-            if should_enforce:
-                if self.settings.project_threads_mode == "private":
-                    should_enforce = not is_sync_bypass and not (
-                        is_start_bypass and message_thread_id is None
-                    )
-                else:
-                    should_enforce = not is_sync_bypass
-
-            if should_enforce:
-                allowed = await self._apply_thread_routing_context(update, context)
-                if not allowed:
-                    return
-
-            try:
-                await handler(update, context)
-            finally:
-                if should_enforce:
-                    self._persist_thread_state(context)
+            await handler(update, context)
 
         return wrapped
-
-    async def _apply_thread_routing_context(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> bool:
-        """Enforce strict project-thread routing and load thread-local state."""
-        manager = context.bot_data.get("project_threads_manager")
-        if manager is None:
-            await self._reject_for_thread_mode(
-                update,
-                "❌ <b>Project Thread Mode Misconfigured</b>\n\n"
-                "Thread manager is not initialized.",
-            )
-            return False
-
-        chat = update.effective_chat
-        message = update.effective_message
-        if not chat or not message:
-            return False
-
-        if self.settings.project_threads_mode == "group":
-            if chat.id != self.settings.project_threads_chat_id:
-                await self._reject_for_thread_mode(
-                    update,
-                    manager.guidance_message(mode=self.settings.project_threads_mode),
-                )
-                return False
-        else:
-            if getattr(chat, "type", "") != "private":
-                await self._reject_for_thread_mode(
-                    update,
-                    manager.guidance_message(mode=self.settings.project_threads_mode),
-                )
-                return False
-
-        message_thread_id = self._extract_message_thread_id(update)
-        if not message_thread_id:
-            await self._reject_for_thread_mode(
-                update,
-                manager.guidance_message(mode=self.settings.project_threads_mode),
-            )
-            return False
-
-        project = await manager.resolve_project(chat.id, message_thread_id)
-        if not project:
-            await self._reject_for_thread_mode(
-                update,
-                manager.guidance_message(mode=self.settings.project_threads_mode),
-            )
-            return False
-
-        state_key = f"{chat.id}:{message_thread_id}"
-        thread_states = context.user_data.setdefault("thread_state", {})
-        state = thread_states.get(state_key, {})
-
-        project_root = project.absolute_path
-        current_dir_raw = state.get("current_directory")
-        current_dir = (
-            Path(current_dir_raw).resolve() if current_dir_raw else project_root
-        )
-        if not self._is_within(current_dir, project_root) or not current_dir.is_dir():
-            current_dir = project_root
-
-        context.user_data["current_directory"] = current_dir
-        context.user_data["claude_session_id"] = state.get("claude_session_id")
-        context.user_data["_thread_context"] = {
-            "chat_id": chat.id,
-            "message_thread_id": message_thread_id,
-            "state_key": state_key,
-            "project_slug": project.slug,
-            "project_root": str(project_root),
-            "project_name": project.name,
-        }
-        return True
-
-    def _persist_thread_state(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Persist compatibility keys back into per-thread state."""
-        thread_context = context.user_data.get("_thread_context")
-        if not thread_context:
-            return
-
-        project_root = Path(thread_context["project_root"])
-        current_dir = context.user_data.get("current_directory", project_root)
-        if not isinstance(current_dir, Path):
-            current_dir = Path(str(current_dir))
-        current_dir = current_dir.resolve()
-        if not self._is_within(current_dir, project_root) or not current_dir.is_dir():
-            current_dir = project_root
-
-        thread_states = context.user_data.setdefault("thread_state", {})
-        thread_states[thread_context["state_key"]] = {
-            "current_directory": str(current_dir),
-            "claude_session_id": context.user_data.get("claude_session_id"),
-            "project_slug": thread_context["project_slug"],
-        }
-
-    @staticmethod
-    def _is_within(path: Path, root: Path) -> bool:
-        """Return True if path is within root."""
-        try:
-            path.relative_to(root)
-            return True
-        except ValueError:
-            return False
-
-    @staticmethod
-    def _extract_message_thread_id(update: Update) -> Optional[int]:
-        """Extract topic/thread id from update message for forum/direct topics."""
-        message = update.effective_message
-        if not message:
-            return None
-        message_thread_id = getattr(message, "message_thread_id", None)
-        if isinstance(message_thread_id, int) and message_thread_id > 0:
-            return message_thread_id
-        dm_topic = getattr(message, "direct_messages_topic", None)
-        topic_id = getattr(dm_topic, "topic_id", None) if dm_topic else None
-        if isinstance(topic_id, int) and topic_id > 0:
-            return topic_id
-        # Telegram omits message_thread_id for the General topic in forum
-        # supergroups; its canonical thread ID is 1.
-        chat = update.effective_chat
-        if chat and getattr(chat, "is_forum", False):
-            return 1
-        return None
-
-    async def _reject_for_thread_mode(self, update: Update, message: str) -> None:
-        """Send a guidance response when strict thread routing rejects an update."""
-        query = update.callback_query
-        if query:
-            try:
-                await query.answer()
-            except Exception:
-                pass
-            if query.message:
-                await query.message.reply_text(message, parse_mode="HTML")
-            return
-
-        if update.effective_message:
-            await update.effective_message.reply_text(message, parse_mode="HTML")
 
     def register_handlers(self, app: Application) -> None:
         """Register the bot's handlers."""
@@ -379,8 +214,6 @@ class MessageOrchestrator:
             ("branch", branch_command.branch_command),
             ("restart", admin_command.restart_command),
         ]
-        if self.settings.enable_project_threads:
-            handlers.append(("sync_threads", admin_command.sync_threads))
 
         # Derive known commands dynamically — avoids drift when new commands are added
         self._known_commands: frozenset[str] = frozenset(cmd for cmd, _ in handlers)
@@ -506,8 +339,6 @@ class MessageOrchestrator:
             BotCommand("branch", "Continue on a copy, leaving this one intact"),
             BotCommand("restart", "Restart the bot"),
         ]
-        if self.settings.enable_project_threads:
-            commands.append(BotCommand("sync_threads", "Sync project topics"))
         return commands
     # --- Agentic handlers ---
 
@@ -516,40 +347,6 @@ class MessageOrchestrator:
     ) -> None:
         """Brief welcome, no buttons."""
         user = update.effective_user
-        sync_line = ""
-        if (
-            self.settings.enable_project_threads
-            and self.settings.project_threads_mode == "private"
-        ):
-            if (
-                not update.effective_chat
-                or getattr(update.effective_chat, "type", "") != "private"
-            ):
-                await update.message.reply_text(
-                    "🚫 <b>Private Topics Mode</b>\n\n"
-                    "Use this bot in a private chat and run <code>/start</code> there.",
-                    parse_mode="HTML",
-                )
-                return
-            manager = context.bot_data.get("project_threads_manager")
-            if manager:
-                try:
-                    result = await manager.sync_topics(
-                        context.bot,
-                        chat_id=update.effective_chat.id,
-                    )
-                    sync_line = (
-                        "\n\n🧵 Topics synced"
-                        f" (created {result.created}, reused {result.reused})."
-                    )
-                except PrivateTopicsUnavailableError:
-                    await update.message.reply_text(
-                        manager.private_topics_unavailable_message(),
-                        parse_mode="HTML",
-                    )
-                    return
-                except Exception:
-                    sync_line = "\n\n🧵 Topic sync failed. Run /sync_threads to retry."
         current_dir = context.user_data.get(
             "current_directory", self.settings.approved_directory
         )
@@ -560,8 +357,7 @@ class MessageOrchestrator:
             f"Hi {safe_name}! I'm your AI coding assistant.\n"
             f"Just tell me what you need — I can read, write, and run code.\n\n"
             f"Working in: {dir_display}\n"
-            f"Commands: /new (reset) · /status"
-            f"{sync_line}",
+            f"Commands: /new (reset) · /status",
             parse_mode="HTML",
         )
 

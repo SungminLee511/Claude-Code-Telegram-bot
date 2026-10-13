@@ -7,9 +7,8 @@ Features:
 - Security violations
 """
 
-import json
-from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
 
 import structlog
@@ -32,17 +31,6 @@ class AuditEvent:
     session_id: Optional[str] = None
     risk_level: str = "low"  # low, medium, high, critical
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for storage/logging."""
-        data = asdict(self)
-        data["timestamp"] = self.timestamp.isoformat()
-        return data
-
-    def to_json(self) -> str:
-        """Convert to JSON string."""
-        return json.dumps(self.to_dict(), default=str)
-
-
 class AuditStorage:
     """Abstract interface for audit event storage."""
 
@@ -60,13 +48,6 @@ class AuditStorage:
     ) -> List[AuditEvent]:
         """Retrieve audit events with filters."""
         raise NotImplementedError
-
-    async def get_security_violations(
-        self, user_id: Optional[int] = None, limit: int = 100
-    ) -> List[AuditEvent]:
-        """Get security violations."""
-        raise NotImplementedError
-
 
 class InMemoryAuditStorage(AuditStorage):
     """In-memory audit storage for development/testing."""
@@ -121,15 +102,6 @@ class InMemoryAuditStorage(AuditStorage):
         filtered_events.sort(key=lambda e: e.timestamp, reverse=True)
         return filtered_events[:limit]
 
-    async def get_security_violations(
-        self, user_id: Optional[int] = None, limit: int = 100
-    ) -> List[AuditEvent]:
-        """Get security violations."""
-        return await self.get_events(
-            user_id=user_id, event_type="security_violation", limit=limit
-        )
-
-
 class AuditLogger:
     """Security audit logger."""
 
@@ -167,25 +139,6 @@ class AuditLogger:
             success=success,
             reason=reason,
         )
-
-    async def log_session_event(
-        self,
-        user_id: int,
-        action: str,
-        success: bool = True,
-        details: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        """Log session-related events."""
-        event = AuditEvent(
-            timestamp=datetime.now(UTC),
-            user_id=user_id,
-            event_type="session",
-            success=success,
-            details={"action": action, **(details or {})},
-            risk_level="low",
-        )
-
-        await self.storage.store_event(event)
 
     async def log_command(
         self,
@@ -390,92 +343,3 @@ class AuditLogger:
 
         return "low"
 
-    async def get_user_activity_summary(
-        self, user_id: int, hours: int = 24
-    ) -> Dict[str, Any]:
-        """Get activity summary for user."""
-        start_time = datetime.now(UTC) - timedelta(hours=hours)
-        events = await self.storage.get_events(
-            user_id=user_id, start_time=start_time, limit=1000
-        )
-
-        # Aggregate statistics
-        summary: Dict[str, Any] = {
-            "user_id": user_id,
-            "period_hours": hours,
-            "total_events": len(events),
-            "event_types": {},
-            "risk_levels": {},
-            "success_rate": 0,
-            "security_violations": 0,
-            "last_activity": None,
-        }
-
-        if events:
-            summary["last_activity"] = events[0].timestamp.isoformat()
-
-            successful_events = 0
-            for event in events:
-                # Count by type
-                event_type = event.event_type
-                summary["event_types"][event_type] = (
-                    summary["event_types"].get(event_type, 0) + 1
-                )
-
-                # Count by risk level
-                risk_level = event.risk_level
-                summary["risk_levels"][risk_level] = (
-                    summary["risk_levels"].get(risk_level, 0) + 1
-                )
-
-                # Count successes
-                if event.success:
-                    successful_events += 1
-
-                # Count security violations
-                if event.event_type == "security_violation":
-                    summary["security_violations"] += 1
-
-            summary["success_rate"] = successful_events / len(events)
-
-        return summary
-
-    async def get_security_dashboard(self) -> Dict[str, Any]:
-        """Get security dashboard data."""
-        # Get recent events (last 24 hours)
-        start_time = datetime.now(UTC) - timedelta(hours=24)
-        recent_events = await self.storage.get_events(start_time=start_time, limit=1000)
-
-        # Get security violations
-        violations = await self.storage.get_security_violations(limit=100)
-
-        dashboard: Dict[str, Any] = {
-            "period": "24_hours",
-            "total_events": len(recent_events),
-            "security_violations": len(violations),
-            "active_users": len(set(e.user_id for e in recent_events)),
-            "risk_distribution": {},
-            "top_violation_types": {},
-            "authentication_failures": 0,
-        }
-
-        # Analyze events
-        for event in recent_events:
-            # Risk distribution
-            risk = event.risk_level
-            dashboard["risk_distribution"][risk] = (
-                dashboard["risk_distribution"].get(risk, 0) + 1
-            )
-
-            # Authentication failures
-            if event.event_type == "auth_attempt" and not event.success:
-                dashboard["authentication_failures"] += 1
-
-        # Analyze violations
-        for violation in violations:
-            violation_type = violation.details.get("violation_type", "unknown")
-            dashboard["top_violation_types"][violation_type] = (
-                dashboard["top_violation_types"].get(violation_type, 0) + 1
-            )
-
-        return dashboard

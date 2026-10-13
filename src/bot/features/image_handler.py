@@ -33,7 +33,6 @@ class ImageHandler:
 
     def __init__(self, config: Settings):
         self.config = config
-        self.supported_formats = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
     async def process_image(
         self, photo: PhotoSize, caption: Optional[str] = None
@@ -148,33 +147,3 @@ class ImageHandler:
 
         return base_prompt
 
-    def supports_format(self, filename: str) -> bool:
-        """Check if image format is supported"""
-        if not filename:
-            return False
-
-        # Extract extension
-        parts = filename.lower().split(".")
-        if len(parts) < 2:
-            return False
-
-        extension = f".{parts[-1]}"
-        return extension in self.supported_formats
-
-    async def validate_image(self, image_bytes: bytes) -> tuple[bool, Optional[str]]:
-        """Validate image data"""
-        # Check size
-        max_size = 10 * 1024 * 1024  # 10MB
-        if len(image_bytes) > max_size:
-            return False, "Image too large (max 10MB)"
-
-        # Check format
-        format_type = self._detect_format(image_bytes)
-        if format_type == "unknown":
-            return False, "Unsupported image format"
-
-        # Basic validity check
-        if len(image_bytes) < 100:  # Too small to be a real image
-            return False, "Invalid image data"
-
-        return True, None

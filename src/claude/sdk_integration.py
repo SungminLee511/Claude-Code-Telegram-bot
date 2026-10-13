@@ -43,6 +43,10 @@ from .monitor import _is_claude_internal_path, check_bash_directory_boundary
 logger = structlog.get_logger()
 
 # Fallback message when Claude produces no text but did use tools.
+TURN_LIMIT_MSG = (
+    "⚠️ Stopped: hit the turn limit ({turns} turns) before finishing. "
+    "Say 'continue' to resume where it left off."
+)
 TASK_COMPLETED_MSG = "✅ Task completed. Tools used: {tools_summary}"
 
 
@@ -63,6 +67,28 @@ class ClaudeResponse:
     # every turn resends the whole history, so the newest turn's input count
     # *is* the current context size.
     context_tokens: Optional[int] = None
+    # The model that actually produced this reply, as reported by the SDK.
+    # The banner falls back to this when the session has made no `/model`
+    # choice and no default is pinned — otherwise the model name would be
+    # dropped from the footer even though a real model clearly answered.
+    model_id: Optional[str] = None
+
+
+def _last_model(messages: List[Any]) -> Optional[str]:
+    """The model string of the last assistant turn, or None if there was none.
+
+    Walks from the end because the very last assistant message is the one that
+    produced the user-visible reply; an earlier one in a multi-turn run may
+    have been a different model (e.g. a sub-agent) and would be misleading in
+    the banner.
+    """
+    for message in reversed(messages):
+        if not isinstance(message, AssistantMessage):
+            continue
+        model = getattr(message, "model", None)
+        if isinstance(model, str) and model:
+            return model
+    return None
 
 
 def _context_tokens(messages: List[Any]) -> Optional[int]:
@@ -109,37 +135,6 @@ class StreamUpdate:
     metadata: Optional[Dict[str, Any]] = None
     progress: Optional[Dict[str, Any]] = None
 
-    def get_tool_names(self) -> List[str]:
-        """Return tool names from the stream payload."""
-        names: List[str] = []
-
-        if self.tool_calls:
-            for tool_call in self.tool_calls:
-                name = tool_call.get("name") if isinstance(tool_call, dict) else None
-                if isinstance(name, str) and name:
-                    names.append(name)
-
-        if self.metadata:
-            tool_name = self.metadata.get("tool_name")
-            if isinstance(tool_name, str) and tool_name:
-                names.append(tool_name)
-
-            metadata_tools = self.metadata.get("tools")
-            if isinstance(metadata_tools, list):
-                for tool in metadata_tools:
-                    if isinstance(tool, dict):
-                        name = tool.get("name")
-                    elif isinstance(tool, str):
-                        name = tool
-                    else:
-                        name = None
-
-                    if isinstance(name, str) and name:
-                        names.append(name)
-
-        # Preserve insertion order while de-duplicating.
-        return list(dict.fromkeys(names))
-
     def is_error(self) -> bool:
         """Check whether this stream update represents an error."""
         if self.type == "error":
@@ -164,56 +159,6 @@ class StreamUpdate:
                 return True
 
         return False
-
-    def get_error_message(self) -> str:
-        """Get the best available error message from the stream payload."""
-        if self.metadata:
-            for key in ("error_message", "error", "message"):
-                value = self.metadata.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value
-
-        if isinstance(self.content, str) and self.content.strip():
-            return self.content
-
-        if self.progress:
-            value = self.progress.get("error")
-            if isinstance(value, str) and value.strip():
-                return value
-
-        return "Unknown error"
-
-    def get_progress_percentage(self) -> Optional[int]:
-        """Extract progress percentage if present."""
-
-        def _to_int(value: Any) -> Optional[int]:
-            if isinstance(value, (int, float)):
-                return int(value)
-            if isinstance(value, str) and value.strip():
-                try:
-                    return int(float(value))
-                except ValueError:
-                    return None
-            return None
-
-        if self.progress:
-            for key in ("percentage", "percent", "progress"):
-                percentage = _to_int(self.progress.get(key))
-                if percentage is not None:
-                    return max(0, min(100, percentage))
-
-            step = _to_int(self.progress.get("step"))
-            total_steps = _to_int(self.progress.get("total_steps"))
-            if step is not None and total_steps and total_steps > 0:
-                return max(0, min(100, int((step / total_steps) * 100)))
-
-        if self.metadata:
-            percentage = _to_int(self.metadata.get("progress_percentage"))
-            if percentage is not None:
-                return max(0, min(100, percentage))
-
-        return None
-
 
 # Tools that need an interactive UI the bot cannot draw. Asking over Telegram
 # means asking in plain text, so these are denied with an instruction the model
@@ -618,8 +563,12 @@ class ClaudeSDKManager:
             tools_used: List[Dict[str, Any]] = []
             claude_session_id = None
             result_content = None
+            hit_turn_limit = False
             for message in messages:
                 if isinstance(message, ResultMessage):
+                    hit_turn_limit = (
+                        getattr(message, "subtype", None) == "error_max_turns"
+                    )
                     cost = getattr(message, "total_cost_usd", 0.0) or 0.0
                     claude_session_id = getattr(message, "session_id", None)
                     result_content = getattr(message, "result", None)
@@ -667,8 +616,16 @@ class ClaudeSDKManager:
                     previous_session_id=session_id,
                 )
 
+            # A turn-limit stop has no final answer; whatever text came before
+            # is mid-task chatter, so say what happened instead of showing it.
+            if hit_turn_limit:
+                logger.warning(
+                    "Claude stopped at turn limit",
+                    max_turns=self.config.claude_max_turns,
+                )
+                content = TURN_LIMIT_MSG.format(turns=self.config.claude_max_turns)
             # Use ResultMessage.result if available, fall back to message extraction
-            if result_content is not None:
+            elif result_content is not None:
                 content = str(result_content).strip()
             else:
                 content_parts = []
@@ -708,6 +665,7 @@ class ClaudeSDKManager:
                 tools_used=tools_used,
                 interrupted=interrupted,
                 context_tokens=_context_tokens(messages),
+                model_id=_last_model(messages),
             )
 
         except asyncio.TimeoutError:

@@ -8,7 +8,6 @@ Features:
 """
 
 import hashlib
-import secrets
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -173,19 +172,6 @@ class TokenAuthProvider(AuthProvider):
         logger.info("Token authentication attempt", user_id=user_id, success=is_valid)
         return is_valid
 
-    async def generate_token(self, user_id: int) -> str:
-        """Generate new authentication token."""
-        token = secrets.token_urlsafe(32)
-        hashed = self._hash_token(token)
-        expires_at = datetime.now(UTC) + self.token_lifetime
-
-        await self.storage.store_token(user_id, hashed, expires_at)
-
-        logger.info(
-            "Token generated", user_id=user_id, expires_at=expires_at.isoformat()
-        )
-        return token
-
     async def revoke_token(self, user_id: int) -> None:
         """Revoke user's token."""
         await self.storage.revoke_token(user_id)
@@ -295,12 +281,6 @@ class AuthenticationManager:
             return True
         return False
 
-    def end_session(self, user_id: int) -> None:
-        """End user session."""
-        if user_id in self.sessions:
-            del self.sessions[user_id]
-            logger.info("Session ended", user_id=user_id)
-
     def _cleanup_expired_sessions(self) -> None:
         """Remove expired sessions."""
         expired_sessions = [
@@ -314,11 +294,6 @@ class AuthenticationManager:
 
         if expired_sessions:
             logger.info("Expired sessions cleaned up", count=len(expired_sessions))
-
-    def get_active_sessions_count(self) -> int:
-        """Get count of active sessions."""
-        self._cleanup_expired_sessions()
-        return len(self.sessions)
 
     def get_session_info(self, user_id: int) -> Optional[Dict[str, Any]]:
         """Get session information for user."""

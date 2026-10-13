@@ -7,7 +7,6 @@ import structlog
 from src.config.settings import Settings
 from src.storage.facade import Storage
 
-from .file_handler import FileHandler
 from .image_handler import ImageHandler
 from .voice_handler import VoiceHandler
 
@@ -27,15 +26,6 @@ class FeatureRegistry:
     def _initialize_features(self):
         """Initialize enabled features."""
         logger.info("Initializing bot features")
-
-        if self.config.enable_file_uploads and self.security:
-            try:
-                self.features["file_handler"] = FileHandler(
-                    config=self.config, security=self.security
-                )
-                logger.info("File handler feature enabled")
-            except Exception as e:
-                logger.error("Failed to initialize file handler", error=str(e))
 
         try:
             self.features["image_handler"] = ImageHandler(config=self.config)
@@ -63,12 +53,6 @@ class FeatureRegistry:
     def get_feature(self, name: str) -> Optional[Any]:
         return self.features.get(name)
 
-    def is_enabled(self, feature_name: str) -> bool:
-        return feature_name in self.features
-
-    def get_file_handler(self) -> Optional[FileHandler]:
-        return self.get_feature("file_handler")
-
     def get_image_handler(self) -> Optional[ImageHandler]:
         return self.get_feature("image_handler")
 
@@ -76,18 +60,6 @@ class FeatureRegistry:
         return self.get_feature("voice_handler")
 
     # Stubs for removed features (handlers may call these)
-    def get_git_integration(self):
-        return None
-
-    def get_quick_actions(self):
-        return None
-
-    def get_session_export(self):
-        return None
-
-    def get_conversation_enhancer(self):
-        return None
-
     def get_enabled_features(self) -> Dict[str, Any]:
         return self.features.copy()
 

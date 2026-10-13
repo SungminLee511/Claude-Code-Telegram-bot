@@ -210,23 +210,6 @@ class RateLimiter:
                     reset_time=now.isoformat(),
                 )
 
-    async def reset_user_limits(self, user_id: int) -> None:
-        """Reset all limits for a user (admin function)."""
-        async with self.locks[user_id]:
-            # Reset cost tracking
-            old_cost = self.cost_tracker[user_id]
-            self.cost_tracker[user_id] = 0
-            self.cost_reset_time[user_id] = datetime.now(UTC)
-
-            # Reset request bucket
-            if user_id in self.request_buckets:
-                self.request_buckets[user_id].tokens = self.request_buckets[
-                    user_id
-                ].capacity
-                self.request_buckets[user_id].last_update = datetime.now(UTC)
-
-            logger.info("User limits reset", user_id=user_id, old_cost=old_cost)
-
     def get_user_status(self, user_id: int) -> Dict[str, Any]:
         """Get current rate limit status for user."""
         # Get request bucket status
@@ -251,44 +234,3 @@ class RateLimiter:
             ).isoformat(),
         }
 
-    def get_global_status(self) -> Dict[str, Any]:
-        """Get global rate limiter statistics."""
-        return {
-            "active_users": len(self.request_buckets),
-            "total_cost_tracked": sum(self.cost_tracker.values()),
-            "config": {
-                "requests_per_window": self.config.rate_limit_requests,
-                "window_seconds": self.config.rate_limit_window,
-                "burst_capacity": self.config.rate_limit_burst,
-                "max_cost_per_user": self.config.claude_max_cost_per_user,
-                "refill_rate": self.refill_rate,
-            },
-        }
-
-    async def cleanup_inactive_users(
-        self, inactive_threshold: timedelta = timedelta(hours=24)
-    ) -> int:
-        """Clean up rate limit data for inactive users."""
-        now = datetime.now(UTC)
-        inactive_users = []
-
-        # Find users with old buckets
-        for user_id, bucket in self.request_buckets.items():
-            if now - bucket.last_update > inactive_threshold:
-                inactive_users.append(user_id)
-
-        # Clean up data
-        for user_id in inactive_users:
-            self.request_buckets.pop(user_id, None)
-            self.cost_tracker.pop(user_id, None)
-            self.cost_reset_time.pop(user_id, None)
-            self.locks.pop(user_id, None)
-
-        if inactive_users:
-            logger.info(
-                "Cleaned up inactive users",
-                count=len(inactive_users),
-                threshold_hours=inactive_threshold.total_seconds() / 3600,
-            )
-
-        return len(inactive_users)

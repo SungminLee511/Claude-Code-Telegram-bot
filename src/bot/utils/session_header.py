@@ -207,16 +207,23 @@ def _effort_label(context) -> Optional[str]:
         return None
 
 
-def _model_label(context) -> Optional[str]:
-    """Which model answered, as a short name — the session's or the default."""
+def _model_label(context, claude_response=None) -> Optional[str]:
+    """Which model answered, as a short name.
+
+    Priority: what the SDK reports actually produced this reply (aliases like
+    `sonnet` resolve to a real version there), else the session's `/model`
+    choice, else the configured default. Reported wins so the banner shows
+    the truth, not just the alias that was requested.
+    """
     try:
         from ..handlers.model_command import current_model_id
 
         settings = context.bot_data.get("settings")
         configured = getattr(settings, "claude_model", None) if settings else None
+        reported = getattr(claude_response, "model_id", None)
         from .models import label_for
 
-        return label_for(current_model_id(context) or configured)
+        return label_for(reported or current_model_id(context) or configured)
     except Exception as exc:  # decoration only
         logger.debug("session_header: model lookup failed", error=str(exc))
         return None
@@ -264,7 +271,7 @@ def build_header(context, claude_response=None) -> Optional[str]:
         # Before the first reply of a restarted process there is no token
         # count yet; the turn count is better than an empty space.
         bits.append(f"{message_count} msg")
-    model = _model_label(context)
+    model = _model_label(context, claude_response)
     if model:
         bits.append(_esc(model))
     effort = _effort_label(context)

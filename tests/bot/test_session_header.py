@@ -434,6 +434,17 @@ def test_a_session_override_wins_over_the_configured_model(monkeypatch):
     assert "opus-5" not in header
 
 
+def test_the_reported_model_wins_over_the_requested_alias(monkeypatch):
+    from types import SimpleNamespace
+
+    context = make_context(claude_model=None)
+    monkeypatch.setitem(context.bot_data, "_model_store", _FixedModel("sonnet"))
+    response = SimpleNamespace(model_id="claude-sonnet-5-5", session_id=None)
+
+    header = build_header(context, response)
+    assert "sonnet-5-5" in header
+
+
 def test_no_model_anywhere_means_no_model_in_the_banner(monkeypatch):
     context = make_context(claude_model=None)
     monkeypatch.setitem(context.bot_data, "_model_store", _NoModels())

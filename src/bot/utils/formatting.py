@@ -4,8 +4,6 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
 from ...config.settings import Settings
 from .html_format import escape_html, markdown_to_telegram_html
 
@@ -16,7 +14,6 @@ class FormattedMessage:
 
     text: str
     parse_mode: str = "HTML"
-    reply_markup: Optional[InlineKeyboardMarkup] = None
 
     def __len__(self) -> int:
         """Return length of message text."""
@@ -54,10 +51,6 @@ class ResponseFormatter:
             text = self._format_code_blocks(text)
             messages = self._split_message(text)
 
-        # Add context-aware quick actions to the last message
-        if messages and self.settings.enable_quick_actions:
-            messages[-1].reply_markup = self._get_contextual_keyboard(context)
-
         # Filter out any empty messages produced by formatting/splitting
         messages = [m for m in messages if m.text and m.text.strip()]
 
@@ -88,105 +81,6 @@ class ResponseFormatter:
         is_very_long = len(text) > self.max_message_length * 2
 
         return code_block_count > 2 or has_file_operations or is_very_long
-
-    def format_error_message(
-        self, error: str, error_type: str = "Error"
-    ) -> FormattedMessage:
-        """Format error message with appropriate styling."""
-        icon = {
-            "Error": "❌",
-            "Warning": "⚠️",
-            "Info": "ℹ️",
-            "Security": "🛡️",
-            "Rate Limit": "⏱️",
-        }.get(error_type, "❌")
-
-        text = f"{icon} <b>{escape_html(error_type)}</b>\n\n{escape_html(error)}"
-
-        return FormattedMessage(text, parse_mode="HTML")
-
-    def format_success_message(
-        self, message: str, title: str = "Success"
-    ) -> FormattedMessage:
-        """Format success message with appropriate styling."""
-        text = f"✅ <b>{escape_html(title)}</b>\n\n{escape_html(message)}"
-        return FormattedMessage(text, parse_mode="HTML")
-
-    def format_info_message(
-        self, message: str, title: str = "Info"
-    ) -> FormattedMessage:
-        """Format info message with appropriate styling."""
-        text = f"ℹ️ <b>{escape_html(title)}</b>\n\n{escape_html(message)}"
-        return FormattedMessage(text, parse_mode="HTML")
-
-    def format_code_output(
-        self, output: str, language: str = "", title: str = "Output"
-    ) -> List[FormattedMessage]:
-        """Format code output with syntax highlighting."""
-        if not output.strip():
-            return [
-                FormattedMessage(
-                    f"📄 <b>{escape_html(title)}</b>\n\n<i>(empty output)</i>"
-                )
-            ]
-
-        escaped_output = escape_html(output)
-
-        # Check if the code block is too long
-        if len(escaped_output) > self.max_code_block_length:
-            escaped_output = (
-                escape_html(output[: self.max_code_block_length - 100])
-                + "\n... (output truncated)"
-            )
-
-        if language:
-            code_block = f'<pre><code class="language-{escape_html(language)}">{escaped_output}</code></pre>'
-        else:
-            code_block = f"<pre><code>{escaped_output}</code></pre>"
-
-        text = f"📄 <b>{escape_html(title)}</b>\n\n{code_block}"
-
-        return self._split_message(text)
-
-    def format_file_list(
-        self, files: List[str], directory: str = ""
-    ) -> FormattedMessage:
-        """Format file listing with appropriate icons."""
-        safe_dir = escape_html(directory)
-        if not files:
-            text = f"📂 <b>{safe_dir}</b>\n\n<i>(empty directory)</i>"
-        else:
-            file_lines = []
-            for file in files[:50]:  # Limit to 50 items
-                safe_file = escape_html(file)
-                if file.endswith("/"):
-                    file_lines.append(f"📁 {safe_file}")
-                else:
-                    file_lines.append(f"📄 {safe_file}")
-
-            file_text = "\n".join(file_lines)
-            if len(files) > 50:
-                file_text += f"\n\n<i>... and {len(files) - 50} more items</i>"
-
-            text = f"📂 <b>{safe_dir}</b>\n\n{file_text}"
-
-        return FormattedMessage(text, parse_mode="HTML")
-
-    def format_progress_message(
-        self, message: str, percentage: Optional[float] = None
-    ) -> FormattedMessage:
-        """Format progress message with optional progress bar."""
-        safe_msg = escape_html(message)
-        if percentage is not None:
-            # Create simple progress bar
-            filled = int(percentage / 10)
-            empty = 10 - filled
-            progress_bar = "▓" * filled + "░" * empty
-            text = f"🔄 <b>{safe_msg}</b>\n\n{progress_bar} {percentage:.0f}%"
-        else:
-            text = f"🔄 <b>{safe_msg}</b>"
-
-        return FormattedMessage(text, parse_mode="HTML")
 
     def _semantic_chunk(self, text: str, context: Optional[dict]) -> List[dict]:
         """Split text into semantic chunks based on content type."""
@@ -406,38 +300,6 @@ class ResponseFormatter:
         # Split if still too long
         return self._split_message(text)
 
-    def _get_contextual_keyboard(
-        self, context: Optional[dict]
-    ) -> Optional[InlineKeyboardMarkup]:
-        """Get context-aware quick action keyboard."""
-        if not context:
-            return self._get_quick_actions_keyboard()
-
-        buttons = []
-
-        # Add context-specific buttons
-        if context.get("has_code"):
-            buttons.append(
-                [InlineKeyboardButton("💾 Save Code", callback_data="save_code")]
-            )
-
-        if context.get("has_file_operations"):
-            buttons.append(
-                [InlineKeyboardButton("📁 Show Files", callback_data="show_files")]
-            )
-
-        if context.get("has_errors"):
-            buttons.append([InlineKeyboardButton("🔧 Debug", callback_data="debug")])
-
-        # Add default actions
-        default_buttons = [
-            [InlineKeyboardButton("🔄 Continue", callback_data="continue")],
-            [InlineKeyboardButton("💡 Explain", callback_data="explain")],
-        ]
-        buttons.extend(default_buttons)
-
-        return InlineKeyboardMarkup(buttons) if buttons else None
-
     def _clean_text(self, text: str) -> str:
         """Clean text for Telegram display."""
         # Remove excessive whitespace
@@ -545,57 +407,4 @@ class ResponseFormatter:
             messages.append(FormattedMessage("\n".join(current_lines)))
 
         return messages
-
-    def _get_quick_actions_keyboard(self) -> InlineKeyboardMarkup:
-        """Get quick actions inline keyboard."""
-        keyboard = [
-            [
-                InlineKeyboardButton("🧪 Test", callback_data="quick:test"),
-                InlineKeyboardButton("📦 Install", callback_data="quick:install"),
-                InlineKeyboardButton("🎨 Format", callback_data="quick:format"),
-            ],
-            [
-                InlineKeyboardButton("🔍 Find TODOs", callback_data="quick:find_todos"),
-                InlineKeyboardButton("🔨 Build", callback_data="quick:build"),
-                InlineKeyboardButton("📊 Git Status", callback_data="quick:git_status"),
-            ],
-        ]
-
-        return InlineKeyboardMarkup(keyboard)
-
-    def create_confirmation_keyboard(
-        self, confirm_data: str, cancel_data: str = "confirm:no"
-    ) -> InlineKeyboardMarkup:
-        """Create a confirmation keyboard."""
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Yes", callback_data=confirm_data),
-                InlineKeyboardButton("❌ No", callback_data=cancel_data),
-            ]
-        ]
-        return InlineKeyboardMarkup(keyboard)
-
-    def create_navigation_keyboard(self, options: List[tuple]) -> InlineKeyboardMarkup:
-        """Create navigation keyboard from options list.
-
-        Args:
-            options: List of (text, callback_data) tuples
-        """
-        keyboard = []
-        current_row = []
-
-        for text, callback_data in options:
-            current_row.append(InlineKeyboardButton(text, callback_data=callback_data))
-
-            # Create rows of 2 buttons
-            if len(current_row) == 2:
-                keyboard.append(current_row)
-                current_row = []
-
-        # Add remaining button if any
-        if current_row:
-            keyboard.append(current_row)
-
-        return InlineKeyboardMarkup(keyboard)
-
 

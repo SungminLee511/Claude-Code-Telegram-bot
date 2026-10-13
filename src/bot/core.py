@@ -380,30 +380,6 @@ class ClaudeCodeBot:
             except Exception:
                 logger.exception("Failed to log error to audit system")
 
-    async def get_bot_info(self) -> Dict[str, Any]:
-        """Get bot information."""
-        if not self.app:
-            return {"status": "not_initialized"}
-
-        try:
-            me = await self.app.bot.get_me()
-            return {
-                "status": "running" if self.is_running else "initialized",
-                "username": me.username,
-                "first_name": me.first_name,
-                "id": me.id,
-                "can_join_groups": me.can_join_groups,
-                "can_read_all_group_messages": me.can_read_all_group_messages,
-                "supports_inline_queries": me.supports_inline_queries,
-                "webhook_url": self.settings.webhook_url,
-                "webhook_port": (
-                    self.settings.webhook_port if self.settings.webhook_url else None
-                ),
-            }
-        except Exception as e:
-            logger.error("Failed to get bot info", error=str(e))
-            return {"status": "error", "error": str(e)}
-
     async def health_check(self) -> bool:
         """Perform health check."""
         try:

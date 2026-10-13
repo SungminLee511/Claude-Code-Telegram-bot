@@ -11,6 +11,7 @@ from __future__ import annotations
 import structlog
 
 from ...claude.exceptions import (
+    ClaudeError,
     ClaudeMCPError,
     ClaudeParsingError,
     ClaudeProcessError,
@@ -261,3 +262,19 @@ def _format_error_message(error: Exception | str) -> str:
         safe_error = safe_error[:500] + "..."
 
     return f"❌ {safe_error}"
+
+
+def _format_process_error(error_str: str) -> str:
+    """Format a Claude process/SDK error with the actual details."""
+    safe_error = escape_html(error_str)
+    if len(safe_error) > 500:
+        safe_error = safe_error[:500] + "..."
+
+    return (
+        f"❌ <b>Claude Process Error</b>\n\n"
+        f"{safe_error}\n\n"
+        "<b>What you can do:</b>\n"
+        "• Try your request again\n"
+        "• Use /new to start a fresh session if the problem persists\n"
+        "• Check /status for current session state"
+    )

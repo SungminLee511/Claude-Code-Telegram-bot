@@ -6,7 +6,7 @@ import logging
 import signal
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import structlog
 
@@ -85,17 +85,14 @@ def parse_args() -> argparse.Namespace:
 def _assert_ports_available(config: Settings) -> None:
     """Fail fast with a clear message if a needed port is already bound.
 
-    Multi-bot: two bots with the same API/webhook port would otherwise crash
-    deep in the server stack with an opaque traceback. Only ports for ENABLED
-    features are checked — most bots run with both disabled, in which case
-    ports are irrelevant and nothing is checked.
+    Multi-bot: two bots with the same webhook port would otherwise crash
+    deep in the server stack with an opaque traceback. Only checked when
+    webhook mode is on — polling bots bind no port.
     """
     import socket
 
     logger = structlog.get_logger()
     to_check = []
-    if config.enable_api_server:
-        to_check.append(("api_server_port", config.api_server_port))
     if config.webhook_url:
         to_check.append(("webhook_port", config.webhook_port))
 

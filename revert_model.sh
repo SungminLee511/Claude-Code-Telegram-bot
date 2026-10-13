@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Emergency revert: put all 3 bots back on claude-opus-5 and restart them.
 # Usage (via SSH if Telegram is dead):
-#   bash /home/sky/home/TRASHCAN/telegram_bot/revert_model.sh
+#   bash <bot_repo>/revert_model.sh
 # Optional: pass a different model, e.g. `bash revert_model.sh claude-opus-4-8`
 set -euo pipefail
 cd "$(dirname "$0")"
