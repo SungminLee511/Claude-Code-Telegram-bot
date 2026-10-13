@@ -825,6 +825,10 @@ class MessageOrchestrator:
         message = update.effective_message
         if message is None or not message.text:
             return
+        if message.via_bot is not None:
+            # An injected wake, not a person answering. Let it through to be
+            # handled as the request it is.
+            return
         from telegram.ext import ApplicationHandlerStop
 
         from .utils.ask_user import answer_with_text

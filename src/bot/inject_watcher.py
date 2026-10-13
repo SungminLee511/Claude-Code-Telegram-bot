@@ -63,6 +63,15 @@ def _build_synthetic_update_payload(chat_id: int, text: str,
                 "first_name": first_name,
             },
             "text": text,
+            # Marks this as a wake, not a person typing. A question waiting
+            # on an answer must not swallow it: the relay would die and the
+            # question would "answer" itself with "RELAY: proceed…".
+            "via_bot": {
+                "id": user_id,
+                "is_bot": True,
+                "first_name": "AutoWake",
+                "username": "autowake",
+            },
         },
     }
 

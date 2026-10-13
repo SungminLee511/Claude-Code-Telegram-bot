@@ -8,7 +8,12 @@ from src.bot.utils import ask_user
 
 
 @pytest.fixture(autouse=True)
-def clean():
+def clean(monkeypatch):
+    # The host may really have relay wakes queued, which would shorten every
+    # deadline in these tests.
+    import src.bot.utils.pending_wakes as pw
+
+    monkeypatch.setattr(pw, "scan_quietly", lambda bot_id=None: [])
     ask_user.clear()
     yield
     ask_user.clear()
@@ -164,11 +169,13 @@ async def test_the_keyboard_is_replaced_by_the_answer():
 
 
 @pytest.mark.asyncio
-async def test_an_unanswered_question_gives_up():
-    """A blocked turn must not wait forever on a tap that never comes."""
+async def test_an_unanswered_question_says_so_and_moves_on():
+    """Nobody is watching, so the useful answer is "decide for yourself"."""
     message = Message()
 
-    assert await ask_user.ask(message, payload("A"), timeout=0.05) is None
+    answer = await ask_user.ask(message, payload("A"), timeout=0.05)
+
+    assert answer == f"Which approach? → {ask_user.TIMEOUT_ANSWER}"
 
 
 @pytest.mark.asyncio
@@ -369,3 +376,62 @@ async def test_a_typed_answer_is_used_verbatim():
     ask_user.answer_with_text("  option B but only on Tuesdays  ")
 
     assert await task == "Which approach? → option B but only on Tuesdays"
+
+
+# --- not waiting past a scheduled wake --------------------------------------
+
+
+def test_the_deadline_is_untouched_when_no_wake_is_due():
+    assert ask_user._deadline(300.0) == 300.0
+
+
+def test_a_sooner_wake_shortens_the_wait(monkeypatch):
+    """Holding the turn open past its own next step would stall the relay."""
+    import src.bot.utils.pending_wakes as pw
+
+    monkeypatch.setattr(
+        pw, "scan_quietly",
+        lambda bot_id=None: [
+            pw.PendingWake(pid=1, bot_id="main", message="RELAY",
+                           fires_at=__import__("time").time() + 60)
+        ],
+    )
+
+    assert 50 < ask_user._deadline(300.0) < 60
+
+
+def test_a_distant_wake_does_not_shorten_anything(monkeypatch):
+    import src.bot.utils.pending_wakes as pw
+
+    monkeypatch.setattr(
+        pw, "scan_quietly",
+        lambda bot_id=None: [
+            pw.PendingWake(pid=1, bot_id="main", message="RELAY",
+                           fires_at=__import__("time").time() + 9999)
+        ],
+    )
+
+    assert ask_user._deadline(300.0) == 300.0
+
+
+def test_an_imminent_wake_still_leaves_time_to_answer(monkeypatch):
+    """A question that appears and vanishes is worse than one that waits."""
+    import src.bot.utils.pending_wakes as pw
+
+    monkeypatch.setattr(
+        pw, "scan_quietly",
+        lambda bot_id=None: [
+            pw.PendingWake(pid=1, bot_id="main", message="RELAY",
+                           fires_at=__import__("time").time() + 1)
+        ],
+    )
+
+    assert ask_user._deadline(300.0) == ask_user._MIN_TIMEOUT
+
+
+def test_a_broken_wake_list_leaves_the_deadline_alone(monkeypatch):
+    import src.bot.utils.pending_wakes as pw
+
+    monkeypatch.setattr(pw, "scan_quietly", lambda bot_id=None: 1 / 0)
+
+    assert ask_user._deadline(300.0) == 300.0

@@ -58,7 +58,7 @@ class StopAwareUpdateProcessor(BaseUpdateProcessor):
             return cb.data.startswith(cls._PRIORITY_PREFIXES)
 
         message = update.effective_message
-        if message is not None and message.text:
+        if message is not None and message.text and message.via_bot is None:
             from .utils.ask_user import pending_count
 
             return pending_count() > 0

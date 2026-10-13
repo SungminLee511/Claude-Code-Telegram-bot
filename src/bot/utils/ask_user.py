@@ -48,6 +48,11 @@ logger = structlog.get_logger()
 
 CALLBACK_PREFIX = "ask:"
 DEFAULT_TIMEOUT = 300.0
+# Never wait less than this, however close a wake is: a question that appears
+# and vanishes is worse than one that waits a moment.
+_MIN_TIMEOUT = 20.0
+# Give up this far before a wake fires, so the two never race.
+_WAKE_MARGIN = 5.0
 
 # Telegram caps callback data at 64 bytes, so the token is short and the
 # options are addressed by index rather than by label.
@@ -68,6 +73,11 @@ _CONFIRM_LABEL = "✏️ Yes, let me type"
 # an empty result: the generic "could not ask" fallback reads like a failure,
 # when in fact the user answered — they said "none of these".
 OTHER_ANSWER = "Other: Ask again in plain text"
+# What the model is told when nobody answers. Same reasoning as Other: an
+# answer it can act on beats an empty result. Nobody is watching, so the
+# honest instruction is to decide and carry on rather than ask again into
+# the same silence.
+TIMEOUT_ANSWER = "Timeout: Proceed with your own decisions"
 _BACK_LABEL = "↩︎ Back to the options"
 
 
@@ -255,6 +265,7 @@ async def ask(message, payload: Dict[str, Any], timeout: float = DEFAULT_TIMEOUT
 async def _ask_one(
     message, question: Dict[str, Any], labels: List[str], timeout: float
 ) -> Optional[str]:
+    timeout = _deadline(timeout)
     token = _token()
     loop = asyncio.get_running_loop()
     waiting = _Pending(labels=labels, future=loop.create_future(), question=question)
@@ -282,8 +293,8 @@ async def _ask_one(
         chosen = labels[index]
     except asyncio.TimeoutError:
         logger.info("ask_user: question timed out", token=token)
-        await _close(sent, "⌛ No answer — carrying on.")
-        return None
+        await _close(sent, "⌛ No answer — carried on without one.")
+        return TIMEOUT_ANSWER
     except Exception as exc:
         logger.warning("ask_user: could not ask", error=str(exc))
         return None
@@ -292,6 +303,27 @@ async def _ask_one(
 
     await _close(sent, f"❓ <b>Answered:</b> {html.escape(chosen)}")
     return chosen
+
+
+def _deadline(timeout: float) -> float:
+    """Shorten the wait when a scheduled wake is due before it would end.
+
+    A relay wake is the signal that this conversation runs itself. Waiting
+    past it would hold the turn open while its own next step is trying to
+    start, so the question gives up a little early instead and the relay
+    keeps its schedule.
+    """
+    try:
+        from . import pending_wakes
+
+        soonest = [w.seconds_left() for w in pending_wakes.scan_quietly()]
+    except Exception:  # a missing wake list must not change the timeout
+        return timeout
+
+    upcoming = [left for left in soonest if left > 0]
+    if not upcoming:
+        return timeout
+    return max(_MIN_TIMEOUT, min(timeout, min(upcoming) - _WAKE_MARGIN))
 
 
 async def _close(sent, text: str) -> None:
