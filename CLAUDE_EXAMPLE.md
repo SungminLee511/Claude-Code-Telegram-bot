@@ -29,6 +29,11 @@ For short waits under 60 seconds, just run the command inline. Do NOT spawn Moni
 GitHub token: `<GITHUB_TOKEN>`
 Use this token whenever the user asks for GitHub operations such as cloning, pushing, or other authenticated `git` / `gh` actions.
 
+# Hugging Face token
+
+Hugging Face token: `<HF_TOKEN>`
+Use this token whenever the user asks for Hugging Face operations — downloading gated models/datasets, pushing to the Hub, or any authenticated `huggingface_hub` / `hf` / `huggingface-cli` calls. Export as `HF_TOKEN` (and `HUGGING_FACE_HUB_TOKEN` for older libraries) when invoking subprocesses that need it.
+
 # Python Execution
 
 Conda env: `<PROJECT_ENV>`
@@ -51,7 +56,7 @@ Exception: when running tests, you can run however you like, but still use the c
 
 # Restart Bot (multi-bot aware)
 
-The repo can run **multiple independent bots**, one per token, fully isolated
+There are **4 bots** (`main`, `bot2`, `bot3`, `bot4`), one per token, fully isolated
 (spool dir, DB, log, process match all keyed by `BOT_ID`). The registry lives in
 `<bot_repo>/bots.yaml`; each bot has a `<BOT_ID>.env` (the `main` bot uses bare
 `.env` and runs without `--config-file` for legacy compatibility).
@@ -164,6 +169,27 @@ Before each `wake_after.sh` call:
 
 Delete the per-bot relay-state file (`/tmp/claude_relay_state_${BOT_ID:-main}.json`) when the relay halts so a fresh relay starts cleanly. To cancel a pending wake, clear this bot's inject file — `rm -f /tmp/claude_inject_message.json` for the `main` bot, or `rm -f /tmp/claude_inject/$BOT_ID/*.json` for a named bot.
 
-# Repo Skills (SKILL.md)
+# Sending files to the user (outbox)
 
-When the user points at a repo, check for repo-specific skill or instruction files before doing work there.
+Bot repo: `~/Claude-Code-Telegram-bot`. To send a file (image, PDF, log, zip…) to the Telegram chat, write/copy it into `<bot_repo>/outbox/`. After the current reply goes out, the bot sweeps the outbox, sends each file, then deletes it.
+- Images (`.png .jpg .jpeg .gif .webp .bmp`, ≤10 MB) arrive as photos; everything else as documents. Hard cap 50 MB per file (oversized files stay in outbox and are reported).
+- Max 10 files / 100 MB per sweep; surplus waits for the next turn. Files are sent in name order (`1-before.png`, `2-after.png`).
+- Files ending `.tmp .part .crdownload .writing` or starting with `.` are skipped — write to a temp name, then rename when finished.
+- The outbox is shared by all bots: drop files only at the end of the turn that should deliver them. Do not use it as storage.
+- Default for "send me X" is the outbox.
+
+# Output port
+
+Output port repo: `~/<OUTPUT_PORT_REPO>` (GitHub `<GITHUB_USER>/<OUTPUT_PORT_REPO>`). A README-based results page pushed to GitHub. Publish results there ONLY when the user explicitly says so ("output port", "push to port", etc.); otherwise use the outbox / chat.
+
+# AskUserQuestion
+
+AskUserQuestion works over Telegram (rendered as buttons, plus an "Other" button; the user may also type the answer). Allowed but not preferred — use it only when a genuinely blocking choice needs the user. Default: ask in plain text and stop.
+
+# Telegram bot slash commands
+
+Handled by the bot, not by Claude (user-side; mention when relevant):
+- `/new` — fresh session. `/sessions` — browse/switch sessions. `/branch` — fork current session into a copy.
+- `/model` — pick model for this session. `/effort` — set thinking effort for this session.
+- `/rename` — rename this session (forwarded to Claude Code).
+- `/restart` — restart the bot. `/start` — start. Hidden but typable: `/status`, `/verbose`, `/repo`.
