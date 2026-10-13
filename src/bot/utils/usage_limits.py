@@ -214,7 +214,7 @@ def current(
     return usage
 
 
-def five_hour_percent(max_age: float = 55.0) -> Optional[float]:
+def five_hour_percent(max_age: float = 295.0) -> Optional[float]:
     """The five-hour spend, 0-100, no older than `max_age` seconds, or None.
 
     For the live bar under a running request, which cannot use the banner's

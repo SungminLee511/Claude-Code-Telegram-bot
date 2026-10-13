@@ -562,7 +562,7 @@ class MessageOrchestrator:
 
         Stream events only arrive when Claude does something, so a long tool
         call or a long think would freeze the bar. This polls on its own clock
-        (every 60s: the usage endpoint rate-limits anything faster) and redraws the
+        (every 5 minutes: the usage endpoint rate-limits faster polling) and redraws the
         message when its text changed. A failed poll keeps the last good value.
         """
 
@@ -586,7 +586,7 @@ class MessageOrchestrator:
                                 )
                             except Exception:
                                 pass
-                    await asyncio.sleep(60)
+                    await asyncio.sleep(300)
             except asyncio.CancelledError:
                 pass
 
