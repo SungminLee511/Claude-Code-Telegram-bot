@@ -377,3 +377,35 @@ def test_the_banner_line_is_the_rendered_usage(creds, endpoint):
     assert first.startswith("5h 18%")
     assert second.startswith("week 22%")
     assert third.startswith("Fable 0%")
+
+
+def test_bar_fills_to_the_nearest_tenth():
+    from src.bot.utils import usage_limits as u
+
+    assert u.bar(0) == "▱▱▱▱▱▱▱▱▱▱ 0%"
+    assert u.bar(31) == "▰▰▰▱▱▱▱▱▱▱ 31%"
+    assert u.bar(100) == "▰▰▰▰▰▰▰▰▰▰ 100%"
+    assert u.bar(140) == "▰▰▰▰▰▰▰▰▰▰ 100%"
+    assert u.bar(-5) == "▱▱▱▱▱▱▱▱▱▱ 0%"
+
+
+def test_five_hour_percent_refetches_when_older_than_max_age(monkeypatch):
+    from src.bot.utils import usage_limits as u
+
+    calls = []
+
+    def fake_fetch(path=u.CREDENTIALS_PATH):
+        calls.append(1)
+        return u.Usage(five_hour=float(len(calls)))
+
+    u.reset_cache()
+    monkeypatch.setattr(u, "fetch", fake_fetch)
+    now = [1000.0]
+    monkeypatch.setattr(u.time, "time", lambda: now[0])
+
+    assert u.five_hour_percent(max_age=5) == 1.0
+    now[0] += 3
+    assert u.five_hour_percent(max_age=5) == 1.0  # still fresh
+    now[0] += 3
+    assert u.five_hour_percent(max_age=5) == 2.0  # 6s old -> refetched
+    u.reset_cache()

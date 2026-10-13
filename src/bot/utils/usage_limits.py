@@ -195,19 +195,46 @@ def fetch(path: Path = CREDENTIALS_PATH) -> Usage:
     )
 
 
-def current(path: Path = CREDENTIALS_PATH, now: Optional[float] = None) -> Usage:
-    """The cached usage, refetched when the cache has gone stale.
+def current(
+    path: Path = CREDENTIALS_PATH,
+    now: Optional[float] = None,
+    max_age: float = _CACHE_SECONDS,
+) -> Usage:
+    """The cached usage, refetched when the cache is older than `max_age`.
 
     A failed fetch is cached too, briefly: if the token is gone, every message
     would otherwise pay the timeout again.
     """
     global _cache
     now = time.time() if now is None else now
-    if _cache is not None and now - _cache[0] < _CACHE_SECONDS:
+    if _cache is not None and now - _cache[0] < max_age:
         return _cache[1]
     usage = fetch(path)
     _cache = (now, usage)
     return usage
+
+
+def five_hour_percent(max_age: float = 5.0) -> Optional[float]:
+    """The five-hour spend, 0-100, no older than `max_age` seconds, or None.
+
+    For the live bar under a running request, which cannot use the banner's
+    one-minute cache. Blocking (a short HTTP call): run it in a thread.
+    """
+    try:
+        return current(max_age=max_age).five_hour
+    except Exception as exc:  # decoration must never cost a reply
+        logger.debug("usage_limits: five_hour_percent failed", error=str(exc))
+        return None
+
+
+BAR_CELLS = 10
+
+
+def bar(percent: float) -> str:
+    """`▰▰▰▱▱▱▱▱▱▱ 31%` — ten cells, filled to the nearest tenth."""
+    clamped = max(0.0, min(100.0, percent))
+    filled = round(clamped / 100 * BAR_CELLS)
+    return f"{'▰' * filled}{'▱' * (BAR_CELLS - filled)} {clamped:.0f}%"
 
 
 def reset_cache() -> None:
