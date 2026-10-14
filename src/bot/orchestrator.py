@@ -7,6 +7,8 @@ conversational; commands exist only for the things a conversation cannot do
 
 import asyncio
 import re
+import os
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -125,6 +127,18 @@ class ActiveRequest:
     interrupt_event: asyncio.Event = field(default_factory=asyncio.Event)
     interrupted: bool = False
     progress_msg: Any = None  # telegram Message object
+
+
+# An empty reply from Claude is retried with a wake after this many seconds.
+EMPTY_REPLY_WAKE_SECONDS = 5
+# Consecutive empty replies that get retried before giving up (a model that
+# keeps answering with nothing would otherwise be woken forever, at your cost).
+MAX_EMPTY_REPLY_RETRIES = 3
+EMPTY_REPLY_WAKE_TEXT = (
+    "DO NOT REPLY WITH NO REPLY MOTHERFUCKER I TOLD YOU IN CLAUDE.MD. "
+    "Answer my last message now."
+)
+_WAKE_SCRIPT = Path(__file__).resolve().parents[2] / "wake_after.sh"
 
 
 class MessageOrchestrator:
@@ -532,6 +546,55 @@ class MessageOrchestrator:
 
         return asyncio.create_task(_heartbeat())
 
+    def _wake_if_empty(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, claude_response: Any
+    ) -> None:
+        """Schedule a nudge when Claude answered with nothing.
+
+        The chat shows "(No content to display)" for an empty reply. Instead of
+        leaving it there, a wake fires a few seconds later telling Claude not to
+        do that. Skipped when you pressed Stop, and capped at
+        MAX_EMPTY_REPLY_RETRIES in a row; any non-empty reply resets the count.
+        Never raises: this is a convenience and must not cost the reply.
+        """
+        try:
+            empty = bool(getattr(claude_response, "no_text", False)) or not (
+                getattr(claude_response, "content", "") or ""
+            ).strip()
+            if not empty:
+                context.user_data["empty_reply_retries"] = 0
+                return
+            if getattr(claude_response, "interrupted", False):
+                return
+            tries = int(context.user_data.get("empty_reply_retries", 0))
+            if tries >= MAX_EMPTY_REPLY_RETRIES:
+                logger.warning("Empty replies kept coming; no more auto-wakes")
+                context.user_data["empty_reply_retries"] = 0
+                return
+            context.user_data["empty_reply_retries"] = tries + 1
+
+            chat = update.effective_chat
+            env = dict(os.environ)
+            if chat is not None:
+                env["WAKE_CHAT_ID"] = str(chat.id)
+            env["INJECT_DIR"] = str(self.settings.inject_dir)
+            subprocess.Popen(
+                [
+                    "bash",
+                    str(_WAKE_SCRIPT),
+                    str(EMPTY_REPLY_WAKE_SECONDS),
+                    EMPTY_REPLY_WAKE_TEXT,
+                    str(self.settings.bot_id),
+                ],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            logger.info("Empty reply: wake scheduled", attempt=tries + 1)
+        except Exception as exc:
+            logger.warning("Could not schedule the empty-reply wake", error=str(exc))
+
     def _make_stream_callback(
         self,
         verbose_level: int,
@@ -867,6 +930,7 @@ class MessageOrchestrator:
             formatted_messages = attach_header(
                 formatted_messages, context, claude_response
             )
+            self._wake_if_empty(update, context, claude_response)
 
         except Exception as e:
             success = False
@@ -1053,6 +1117,7 @@ class MessageOrchestrator:
             formatted_messages = attach_header(
                 formatted_messages, context, claude_response
             )
+            self._wake_if_empty(update, context, claude_response)
 
             await self._close_progress(progress_msg)
 
@@ -1259,6 +1324,7 @@ class MessageOrchestrator:
         formatter = ResponseFormatter(self.settings)
         formatted_messages = formatter.format_claude_response(claude_response.content)
         formatted_messages = attach_header(formatted_messages, context, claude_response)
+        self._wake_if_empty(update, context, claude_response)
 
         await self._close_progress(progress_msg)
 

@@ -63,6 +63,9 @@ class ClaudeResponse:
     error_type: Optional[str] = None
     tools_used: List[Dict[str, Any]] = field(default_factory=list)
     interrupted: bool = False
+    # True when Claude wrote no reply text at all. `content` may still be a
+    # stand-in ("Task completed. Tools used: …"), so this is the real signal.
+    no_text: bool = False
     # Size of the conversation as the model last saw it. Not a running total:
     # every turn resends the whole history, so the newest turn's input count
     # *is* the current context size.
@@ -644,6 +647,7 @@ class ClaudeSDKManager:
                             content_parts.append(str(msg_content))
                 content = "\n".join(content_parts).strip()
 
+            no_text = not content and not hit_turn_limit
             if not content and tools_used:
                 tool_names = [
                     tool.get("name", "")
@@ -668,6 +672,7 @@ class ClaudeSDKManager:
                 ),
                 tools_used=tools_used,
                 interrupted=interrupted,
+                no_text=no_text,
                 context_tokens=_context_tokens(messages),
                 model_id=_last_model(messages),
             )
