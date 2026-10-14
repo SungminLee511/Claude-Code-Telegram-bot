@@ -546,6 +546,13 @@ class MessageOrchestrator:
 
         return asyncio.create_task(_heartbeat())
 
+    @staticmethod
+    def _stop_keyboard(user_id: int) -> InlineKeyboardMarkup:
+        """The Stop button shown on a running request's progress message."""
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Stop", callback_data=f"stop:{user_id}")]]
+        )
+
     def _wake_if_empty(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, claude_response: Any
     ) -> None:
@@ -1034,7 +1041,16 @@ class MessageOrchestrator:
 
         chat = update.message.chat
         await chat.send_action("typing")
-        progress_msg = await self._open_progress(update, "Working...")
+        interrupt_event = asyncio.Event()
+        stop_kb = self._stop_keyboard(user_id)
+        progress_msg = await self._open_progress(
+            update, "Working...", reply_markup=stop_kb
+        )
+        self._active_requests[user_id] = ActiveRequest(
+            user_id=user_id,
+            interrupt_event=interrupt_event,
+            progress_msg=progress_msg,
+        )
 
         # Save the upload to the inbox and hand Claude the *path*. Inlining the
         # bytes would cap us at text files small enough to fit in a prompt;
@@ -1051,6 +1067,7 @@ class MessageOrchestrator:
             uploads.cleanup()
         except Exception as exc:
             logger.error("Upload save failed", error=str(exc), user_id=user_id)
+            self._active_requests.pop(user_id, None)
             await self._fail_progress(
                 progress_msg, f"Could not save the file: {exc}"
             )
@@ -1059,6 +1076,7 @@ class MessageOrchestrator:
         # Process with Claude
         claude_integration = context.bot_data.get("claude_integration")
         if not claude_integration:
+            self._active_requests.pop(user_id, None)
             await self._fail_progress(
                 progress_msg, "Claude integration not available. Check configuration."
             )
@@ -1080,6 +1098,8 @@ class MessageOrchestrator:
             progress_msg,
             tool_log,
             time.time(),
+            reply_markup=stop_kb,
+            interrupt_event=interrupt_event,
         )
 
         heartbeat = self._start_typing_heartbeat(chat)
@@ -1091,6 +1111,7 @@ class MessageOrchestrator:
                 session_id=session_id,
                 on_stream=on_stream,
                 force_new=force_new,
+                interrupt_event=interrupt_event,
                 model=model_command.current_model_id(context),
                 effort=effort_command.current_effort(context),
             )
@@ -1111,9 +1132,12 @@ class MessageOrchestrator:
             from .utils.formatting import ResponseFormatter
 
             formatter = ResponseFormatter(self.settings)
-            formatted_messages = formatter.format_claude_response(
-                claude_response.content
-            )
+            response_content = claude_response.content
+            if claude_response.interrupted:
+                response_content = (
+                    response_content or ""
+                ) + "\n\n_(Interrupted by user)_"
+            formatted_messages = formatter.format_claude_response(response_content)
             formatted_messages = attach_header(
                 formatted_messages, context, claude_response
             )
@@ -1145,6 +1169,7 @@ class MessageOrchestrator:
             logger.error("Claude file processing failed", error=str(e), user_id=user_id)
         finally:
             heartbeat.cancel()
+            self._active_requests.pop(user_id, None)
             await self._flush_outbox(update)
 
     async def agentic_photo(
@@ -1162,7 +1187,16 @@ class MessageOrchestrator:
 
         chat = update.message.chat
         await chat.send_action("typing")
-        progress_msg = await self._open_progress(update, "Working...")
+        interrupt_event = asyncio.Event()
+        stop_kb = self._stop_keyboard(user_id)
+        progress_msg = await self._open_progress(
+            update, "Working...", reply_markup=stop_kb
+        )
+        self._active_requests[user_id] = ActiveRequest(
+            user_id=user_id,
+            interrupt_event=interrupt_event,
+            progress_msg=progress_msg,
+        )
 
         try:
             photo = update.message.photo[-1]
@@ -1201,11 +1235,14 @@ class MessageOrchestrator:
                 user_id=user_id,
                 chat=chat,
                 images=images,
+                interrupt_event=interrupt_event,
+                stop_kb=stop_kb,
             )
 
         except Exception as e:
             from .handlers.common import _format_error_message
 
+            self._active_requests.pop(user_id, None)
             await self._fail_progress(
                 progress_msg, _format_error_message(e), parse_mode="HTML"
             )
@@ -1228,7 +1265,16 @@ class MessageOrchestrator:
 
         chat = update.message.chat
         await chat.send_action("typing")
-        progress_msg = await self._open_progress(update, "Transcribing...")
+        interrupt_event = asyncio.Event()
+        stop_kb = self._stop_keyboard(user_id)
+        progress_msg = await self._open_progress(
+            update, "Transcribing...", reply_markup=stop_kb
+        )
+        self._active_requests[user_id] = ActiveRequest(
+            user_id=user_id,
+            interrupt_event=interrupt_event,
+            progress_msg=progress_msg,
+        )
 
         try:
             voice = update.message.voice
@@ -1236,7 +1282,8 @@ class MessageOrchestrator:
                 voice, update.message.caption
             )
 
-            await progress_msg.edit_text("Working...")
+            if not interrupt_event.is_set():
+                await progress_msg.edit_text("Working...", reply_markup=stop_kb)
             await self._handle_agentic_media_message(
                 update=update,
                 context=context,
@@ -1244,11 +1291,14 @@ class MessageOrchestrator:
                 progress_msg=progress_msg,
                 user_id=user_id,
                 chat=chat,
+                interrupt_event=interrupt_event,
+                stop_kb=stop_kb,
             )
 
         except Exception as e:
             from .handlers.common import _format_error_message
 
+            self._active_requests.pop(user_id, None)
             await self._fail_progress(
                 progress_msg, _format_error_message(e), parse_mode="HTML"
             )
@@ -1266,13 +1316,22 @@ class MessageOrchestrator:
         user_id: int,
         chat: Any,
         images: Optional[List[Dict[str, str]]] = None,
+        interrupt_event: Optional[asyncio.Event] = None,
+        stop_kb: Optional[InlineKeyboardMarkup] = None,
     ) -> None:
         """Run a media-derived prompt through Claude and send responses."""
         claude_integration = context.bot_data.get("claude_integration")
         if not claude_integration:
+            self._active_requests.pop(user_id, None)
             await self._fail_progress(
                 progress_msg, "Claude integration not available. Check configuration."
             )
+            return
+
+        # Stop pressed while the photo/voice was still being prepared.
+        if interrupt_event is not None and interrupt_event.is_set():
+            self._active_requests.pop(user_id, None)
+            await self._fail_progress(progress_msg, "Stopped.")
             return
 
         current_dir = context.user_data.get(
@@ -1288,6 +1347,8 @@ class MessageOrchestrator:
             progress_msg,
             tool_log,
             time.time(),
+            reply_markup=stop_kb,
+            interrupt_event=interrupt_event,
         )
 
         heartbeat = self._start_typing_heartbeat(chat)
@@ -1300,11 +1361,13 @@ class MessageOrchestrator:
                 on_stream=on_stream,
                 force_new=force_new,
                 images=images,
+                interrupt_event=interrupt_event,
                 model=model_command.current_model_id(context),
                 effort=effort_command.current_effort(context),
             )
         finally:
             heartbeat.cancel()
+            self._active_requests.pop(user_id, None)
 
         if force_new:
             context.user_data["force_new_session"] = False
@@ -1322,7 +1385,10 @@ class MessageOrchestrator:
         from .utils.formatting import ResponseFormatter
 
         formatter = ResponseFormatter(self.settings)
-        formatted_messages = formatter.format_claude_response(claude_response.content)
+        response_content = claude_response.content
+        if claude_response.interrupted:
+            response_content = (response_content or "") + "\n\n_(Interrupted by user)_"
+        formatted_messages = formatter.format_claude_response(response_content)
         formatted_messages = attach_header(formatted_messages, context, claude_response)
         self._wake_if_empty(update, context, claude_response)
 
