@@ -1,11 +1,13 @@
 """Tests for the /sessions picker."""
 
 from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from src.bot.handlers import session_picker as sp
+from src.claude.session import ClaudeSession
 from src.claude.session_index import SessionInfo
 
 
@@ -213,15 +215,28 @@ async def test_resume_writes_a_db_row_so_the_sdk_can_resume():
     assert saved.project_path == Path("/home")
 
 
-async def test_resume_does_not_duplicate_an_existing_row():
+async def test_resume_refreshes_an_existing_stale_row():
+    """Picking an idle (past-timeout) session must revive it, not drop it."""
     sessions = [make_info(5)]
     context = make_context(sessions)
     manager = context.bot_data["claude_integration"].session_manager
-    manager.storage.known[sessions[0].session_id] = "already here"
+    stale = datetime.now(UTC) - timedelta(days=30)
+    row = ClaudeSession(
+        session_id=sessions[0].session_id,
+        user_id=777,
+        project_path=Path("/home"),
+        created_at=stale,
+        last_used=stale,
+        total_cost=1.5,
+    )
+    manager.storage.known[row.session_id] = row
 
     await sp.sessions_callback(make_update(FakeQuery("sess:go:0")), context)
 
-    assert manager.storage.saved == []
+    assert manager.storage.saved == [row]  # same row updated, no new one
+    assert not row.is_expired(24)
+    assert row.total_cost == 1.5
+    assert manager.active_sessions[row.session_id] is row
     assert context.user_data["claude_session_id"] == sessions[0].session_id
 
 

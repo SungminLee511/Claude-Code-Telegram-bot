@@ -388,14 +388,27 @@ async def _resume_session(
     project_path = Path(info.cwd) if info.cwd else settings.approved_directory
 
     # Persist a row so SessionManager resolves the id instead of minting a
-    # fresh empty session (which would drop all context).
+    # fresh empty session (which would drop all context). An explicit pick
+    # also refreshes last_used, so an idle session past the timeout still
+    # resumes instead of being silently replaced.
     if manager is not None:
         try:
             existing = await manager.storage.load_session(info.session_id, user_id)
         except Exception:
             existing = None
-        if existing is None:
-            now = datetime.now(UTC)
+        now = datetime.now(UTC)
+        if existing is not None:
+            existing.last_used = now
+            try:
+                await manager.storage.save_session(existing)
+                manager.active_sessions[info.session_id] = existing
+            except Exception as exc:
+                logger.warning(
+                    "Failed to refresh picked session",
+                    session_id=info.session_id,
+                    error=str(exc),
+                )
+        else:
             session = ClaudeSession(
                 session_id=info.session_id,
                 user_id=user_id,
