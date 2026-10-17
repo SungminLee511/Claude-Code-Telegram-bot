@@ -16,6 +16,7 @@ Switching sessions is two steps:
 from __future__ import annotations
 
 import html
+import json
 import sqlite3
 import time
 from datetime import UTC, datetime
@@ -39,6 +40,8 @@ _INDEX_KEY = "_session_index"
 _LIST_KEY = "sessions_list"
 _QUERY_KEY = "sessions_query"
 _ALL_KEY = "sessions_show_all"
+_HIDDEN_KEY = "sessions_show_hidden"
+_PENDING_HIDE_KEY = "sessions_pending_hide"
 
 # --- which bot owns a session -------------------------------------------------
 #
@@ -94,6 +97,44 @@ def session_owners(context: ContextTypes.DEFAULT_TYPE) -> Dict[str, str]:
         owners = cached[1] if cached else {}
     context.bot_data[_OWNER_CACHE_KEY] = (now, owners)
     return owners
+
+
+# --- hidden sessions -----------------------------------------------------------
+#
+# "Hiding" only flags an id; the transcript stays on disk and can be unhidden
+# via `/sessions hidden`. The flag file is shared by every bot on the host,
+# since the transcripts themselves are shared.
+
+HIDDEN_FILE_NAME = "hidden_sessions.json"
+
+
+def _hidden_path() -> Path:
+    return DB_DIR / HIDDEN_FILE_NAME
+
+
+def load_hidden() -> set:
+    try:
+        data = json.loads(_hidden_path().read_text())
+    except (OSError, ValueError):
+        return set()
+    return {str(x) for x in data} if isinstance(data, list) else set()
+
+
+def _save_hidden(ids: set) -> None:
+    path = _hidden_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(sorted(ids)))
+    tmp.replace(path)
+
+
+def set_hidden(session_id: str, hidden: bool) -> None:
+    ids = load_hidden()
+    if hidden:
+        ids.add(session_id)
+    else:
+        ids.discard(session_id)
+    _save_hidden(ids)
 
 
 def get_index(context: ContextTypes.DEFAULT_TYPE) -> SessionIndex:
@@ -155,8 +196,10 @@ def _page_text(
     current_id: Optional[str],
     query: str,
     owners: Optional[Dict[str, str]] = None,
+    hidden_mode: bool = False,
 ) -> str:
-    header = f"🗂 <b>Sessions</b> — page {page + 1}/{max(1, total_pages)}"
+    title = "🙈 <b>Hidden sessions</b>" if hidden_mode else "🗂 <b>Sessions</b>"
+    header = f"{title} — page {page + 1}/{max(1, total_pages)}"
     if query:
         header += f"  (filter: <code>{_esc(query)}</code>)"
     lines = [header, ""]
@@ -211,15 +254,26 @@ def _page_keyboard(
 
 
 def _load_sessions(
-    context: ContextTypes.DEFAULT_TYPE, query: str = "", show_all: bool = False
+    context: ContextTypes.DEFAULT_TYPE,
+    query: str = "",
+    show_all: bool = False,
+    hidden_mode: bool = False,
 ) -> List[SessionInfo]:
     index = get_index(context)
     sessions = index.search(query) if query else index.refresh()
-    if not show_all:
-        sessions = sessions[:MAX_SESSIONS]
+    hidden = load_hidden()
+    if hidden_mode:
+        # Hidden view: only flagged sessions, never capped (it is a short list).
+        sessions = [s for s in sessions if s.session_id in hidden]
+    else:
+        # Filter before capping, so hiding one lets the next-oldest move up.
+        sessions = [s for s in sessions if s.session_id not in hidden]
+        if not show_all:
+            sessions = sessions[:MAX_SESSIONS]
     context.user_data[_LIST_KEY] = [s.session_id for s in sessions]
     context.user_data[_QUERY_KEY] = query
     context.user_data[_ALL_KEY] = show_all
+    context.user_data[_HIDDEN_KEY] = hidden_mode
     return sessions
 
 
@@ -233,27 +287,36 @@ def _sessions_for_page(context: ContextTypes.DEFAULT_TYPE) -> List[SessionInfo]:
         context,
         context.user_data.get(_QUERY_KEY, ""),
         context.user_data.get(_ALL_KEY, False),
+        context.user_data.get(_HIDDEN_KEY, False),
     )
 
 
 async def sessions_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """`/sessions [all | search text]` — show page 1 of the session list."""
+    """`/sessions [all | hidden | search text]` — show page 1 of the list."""
     args = list(context.args or [])
-    show_all = bool(args) and args[0].lower() == "all"
-    if show_all:
+    first = args[0].lower() if args else ""
+    show_all = first == "all"
+    hidden_mode = first == "hidden"
+    if show_all or hidden_mode:
         args = args[1:]
     query = " ".join(args)
 
-    sessions = _load_sessions(context, query, show_all)
+    sessions = _load_sessions(context, query, show_all, hidden_mode)
     total_pages = (len(sessions) + PAGE_SIZE - 1) // PAGE_SIZE
     current_id = context.user_data.get("claude_session_id")
 
     text = _page_text(
-        sessions, 0, total_pages, current_id, query, session_owners(context)
+        sessions,
+        0,
+        total_pages,
+        current_id,
+        query,
+        session_owners(context),
+        hidden_mode,
     )
-    if not show_all and len(sessions) >= MAX_SESSIONS:
+    if not show_all and not hidden_mode and len(sessions) >= MAX_SESSIONS:
         text += f"\n<i>Showing last {MAX_SESSIONS} — /sessions all for more.</i>"
 
     await update.message.reply_text(
@@ -278,7 +341,13 @@ def _detail_text(info: SessionInfo, current_id: Optional[str], bot_label: str) -
     return "\n".join(lines)
 
 
-def _detail_keyboard(position: int, page: int) -> InlineKeyboardMarkup:
+def _detail_keyboard(
+    position: int, page: int, hidden: bool = False
+) -> InlineKeyboardMarkup:
+    if hidden:
+        toggle = InlineKeyboardButton("👀 Unhide", callback_data=f"sess:unhide:{position}")
+    else:
+        toggle = InlineKeyboardButton("🙈 Hide", callback_data=f"sess:hide:{position}")
     return InlineKeyboardMarkup(
         [
             [
@@ -289,7 +358,23 @@ def _detail_keyboard(position: int, page: int) -> InlineKeyboardMarkup:
                     "👁 Preview", callback_data=f"sess:prev:{position}"
                 ),
             ],
-            [InlineKeyboardButton("◀ Back", callback_data=f"sess:page:{page}")],
+            [
+                toggle,
+                InlineKeyboardButton("◀ Back", callback_data=f"sess:page:{page}"),
+            ],
+        ]
+    )
+
+
+def _confirm_hide_keyboard(position: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Yes, hide", callback_data=f"sess:hideyes:{position}"
+                ),
+                InlineKeyboardButton("✖ Cancel", callback_data=f"sess:open:{position}"),
+            ]
         ]
     )
 
@@ -330,6 +415,7 @@ async def sessions_callback(
                 current_id,
                 context.user_data.get(_QUERY_KEY, ""),
                 session_owners(context),
+                context.user_data.get(_HIDDEN_KEY, False),
             ),
             parse_mode="HTML",
             reply_markup=_page_keyboard(sessions, page, total_pages),
@@ -342,13 +428,59 @@ async def sessions_callback(
 
     info = sessions[arg]
     page = arg // PAGE_SIZE
+    hidden_mode = context.user_data.get(_HIDDEN_KEY, False)
 
     if action == "open":
         label = await _bot_label(context, info.session_id)
         await query.edit_message_text(
             _detail_text(info, current_id, label),
             parse_mode="HTML",
-            reply_markup=_detail_keyboard(arg, page),
+            reply_markup=_detail_keyboard(arg, page, hidden_mode),
+        )
+        return
+
+    if action == "hide":
+        context.user_data[_PENDING_HIDE_KEY] = info.session_id
+        await query.edit_message_text(
+            f"🙈 Hide <b>{_esc(info.display_name[:60])}</b>?\n\n"
+            "<i>Transcript stays on disk. Undo via /sessions hidden.</i>",
+            parse_mode="HTML",
+            reply_markup=_confirm_hide_keyboard(arg),
+        )
+        return
+
+    if action in ("hideyes", "unhide"):
+        # Positions can shift if a new session appears between the confirm
+        # screen and the tap; never hide a session the user did not pick.
+        if action == "hideyes" and (
+            context.user_data.pop(_PENDING_HIDE_KEY, None) != info.session_id
+        ):
+            await query.edit_message_text(
+                "Session list changed. Run /sessions again."
+            )
+            return
+        set_hidden(info.session_id, action == "hideyes")
+        logger.info(
+            "Session visibility changed",
+            session_id=info.session_id,
+            hidden=action == "hideyes",
+        )
+        # Rebuild: the list shrank, so redraw the page the entry was on.
+        sessions = _sessions_for_page(context)
+        total_pages = (len(sessions) + PAGE_SIZE - 1) // PAGE_SIZE
+        page = max(0, min(page, max(0, total_pages - 1)))
+        await query.edit_message_text(
+            _page_text(
+                sessions,
+                page,
+                total_pages,
+                current_id,
+                context.user_data.get(_QUERY_KEY, ""),
+                session_owners(context),
+                hidden_mode,
+            ),
+            parse_mode="HTML",
+            reply_markup=_page_keyboard(sessions, page, total_pages),
         )
         return
 
@@ -364,7 +496,7 @@ async def sessions_callback(
         await query.edit_message_text(
             "\n".join(lines),
             parse_mode="HTML",
-            reply_markup=_detail_keyboard(arg, page),
+            reply_markup=_detail_keyboard(arg, page, hidden_mode),
         )
         return
 

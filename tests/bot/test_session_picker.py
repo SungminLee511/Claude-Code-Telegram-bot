@@ -430,3 +430,92 @@ def test_the_list_shows_when_the_session_started(tmp_path):
 
     # 05:33 UTC is 14:33 KST.
     assert "14:33" in _started_suffix(info)
+
+
+# --- hiding -------------------------------------------------------------------
+
+
+def _ids(sessions):
+    return [s.session_id for s in sessions]
+
+
+async def test_hidden_session_leaves_list_and_next_one_moves_up():
+    infos = [make_info(i) for i in range(12)]
+    context = make_context(infos)
+    sp.set_hidden(infos[0].session_id, True)
+
+    sessions = sp._load_sessions(context, "")
+
+    assert infos[0].session_id not in _ids(sessions)
+    assert len(sessions) == 10
+    assert infos[10].session_id in _ids(sessions)
+    assert infos[0].session_id not in _ids(sp._load_sessions(context, "", True))
+
+
+async def test_hidden_view_lists_only_hidden():
+    infos = [make_info(i) for i in range(5)]
+    context = make_context(infos)
+    sp.set_hidden(infos[2].session_id, True)
+
+    assert _ids(sp._load_sessions(context, "", hidden_mode=True)) == [
+        infos[2].session_id
+    ]
+
+
+async def test_hide_asks_then_confirm_hides():
+    infos = [make_info(i) for i in range(3)]
+    context = make_context(infos)
+    sp._load_sessions(context, "")
+
+    q1 = FakeQuery("sess:hide:1")
+    await sp.sessions_callback(make_update(q1), context)
+    assert "Hide" in q1.edited
+    assert sp.load_hidden() == set()
+
+    q2 = FakeQuery("sess:hideyes:1")
+    await sp.sessions_callback(make_update(q2), context)
+    assert sp.load_hidden() == {infos[1].session_id}
+    assert "Sessions" in q2.edited
+
+
+async def test_confirm_without_matching_pending_does_nothing():
+    infos = [make_info(i) for i in range(3)]
+    context = make_context(infos)
+    q = FakeQuery("sess:hideyes:1")
+
+    await sp.sessions_callback(make_update(q), context)
+
+    assert sp.load_hidden() == set()
+    assert "changed" in q.edited
+
+
+async def test_unhide_from_hidden_view():
+    infos = [make_info(i) for i in range(3)]
+    context = make_context(infos)
+    sp.set_hidden(infos[1].session_id, True)
+    sp._load_sessions(context, "", hidden_mode=True)
+
+    q = FakeQuery("sess:unhide:0")
+    await sp.sessions_callback(make_update(q), context)
+
+    assert sp.load_hidden() == set()
+    assert "Hidden sessions" in q.edited
+
+
+async def test_detail_offers_unhide_in_hidden_view():
+    infos = [make_info(i) for i in range(2)]
+    context = make_context(infos)
+    sp.set_hidden(infos[0].session_id, True)
+    sp._load_sessions(context, "", hidden_mode=True)
+
+    q = FakeQuery("sess:open:0")
+    await sp.sessions_callback(make_update(q), context)
+
+    labels = [b.text for row in q.markup.inline_keyboard for b in row]
+    assert "👀 Unhide" in labels and "🙈 Hide" not in labels
+
+
+def test_corrupt_hidden_file_reads_as_empty(isolated_db_dir):
+    isolated_db_dir.mkdir(parents=True, exist_ok=True)
+    (isolated_db_dir / sp.HIDDEN_FILE_NAME).write_text("{not json")
+    assert sp.load_hidden() == set()
