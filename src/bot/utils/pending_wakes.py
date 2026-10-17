@@ -1,7 +1,9 @@
 """Discover scheduled-but-not-yet-fired wake-ups.
 
 `wake_after.sh` schedules a wake by leaving a detached `bash -c "sleep N; ..."`
-running. Nothing records that anywhere: the sleeping process *is* the schedule.
+running. `wake_when.sh` leaves a polling worker whose first argument is
+`conditional wake (bot=<id> timeout=<N>s)`; it is the same idea with a different
+trigger, so both are listed, and told apart by `kind`. Nothing records that anywhere: the sleeping process *is* the schedule.
 So this reads the processes rather than a registry file, which means a wake
 killed by hand, or lost to a reboot, disappears from the list by itself and a
 wake scheduled before this code existed still shows up.
@@ -32,6 +34,9 @@ logger = structlog.get_logger()
 # Emitted by the worker that wake_after.sh generates. Matching the echo line
 # rather than the `sleep` keeps us from picking up unrelated sleeps.
 _WAKE_RE = re.compile(r"firing wake after (\d+)s \(bot=([A-Za-z0-9_-]+)\)")
+# The marker wake_when.sh puts on its worker's command line ($0). The number is
+# the timeout, i.e. the latest moment the wake can fire.
+_COND_RE = re.compile(r"conditional wake \(bot=([A-Za-z0-9_-]+) timeout=(\d+)s\)")
 
 _PROC = Path("/proc")
 
@@ -43,7 +48,9 @@ class PendingWake:
     pid: int
     bot_id: str
     message: str
-    fires_at: float  # unix seconds
+    fires_at: float  # unix seconds; for a conditional wake, its timeout
+    kind: str = "timed"  # "timed" (wake_after.sh) or "conditional" (wake_when.sh)
+    flag: str = ""  # the flag file a conditional wake is watching
 
     def seconds_left(self, now: Optional[float] = None) -> float:
         return self.fires_at - (now if now is not None else time.time())
@@ -73,16 +80,20 @@ def _process_start(stat_text: str, clock_ticks: int) -> Optional[float]:
         return None
 
 
-def _read_message(proc_dir: Path) -> str:
+def _read_env(proc_dir: Path, wanted: str) -> str:
     try:
         raw = (proc_dir / "environ").read_bytes().decode("utf-8", "replace")
     except OSError:
         return ""
     for item in raw.split("\0"):
         key, sep, value = item.partition("=")
-        if sep and key == "WAKE_MESSAGE":
+        if sep and key == wanted:
             return value
     return ""
+
+
+def _read_message(proc_dir: Path) -> str:
+    return _read_env(proc_dir, "WAKE_MESSAGE")
 
 
 def scan(bot_id: Optional[str] = None, proc: Path = _PROC) -> List[PendingWake]:
@@ -114,9 +125,15 @@ def scan(bot_id: Optional[str] = None, proc: Path = _PROC) -> List[PendingWake]:
         except OSError:
             continue  # exited, or not ours to read
         match = _WAKE_RE.search(cmdline)
-        if not match:
-            continue
-        delay, found_bot = int(match.group(1)), match.group(2)
+        kind = "timed"
+        if match:
+            delay, found_bot = int(match.group(1)), match.group(2)
+        else:
+            cond = _COND_RE.search(cmdline)
+            if not cond:
+                continue
+            kind = "conditional"
+            found_bot, delay = cond.group(1), int(cond.group(2))
         if bot_id is not None and found_bot != bot_id:
             continue
         try:
@@ -132,6 +149,8 @@ def scan(bot_id: Optional[str] = None, proc: Path = _PROC) -> List[PendingWake]:
                 bot_id=found_bot,
                 message=_read_message(entry),
                 fires_at=boot + started + delay,
+                kind=kind,
+                flag=_read_env(entry, "WAKE_FLAG") if kind == "conditional" else "",
             )
         )
 

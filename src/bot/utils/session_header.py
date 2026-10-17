@@ -20,6 +20,7 @@ from __future__ import annotations
 import html
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import List, Optional
 
 import structlog
@@ -308,21 +309,43 @@ def _wake_lines(bot_id: str, now: Optional[float] = None) -> Optional[str]:
     if not wakes:
         return None
 
-    plural = "wake" if len(wakes) == 1 else "wakes"
-    lines = [f"   ⏰ {len(wakes)} {plural}"]
-    for wake in wakes[:_MAX_WAKE_LINES]:
-        when = _kst_clock(wake.fires_at)
-        left = format_elapsed(max(0, wake.seconds_left(now)))
-        text = _one_line(wake.message)
-        if len(text) > _MAX_WAKE_MESSAGE:
-            text = text[: _MAX_WAKE_MESSAGE - 1] + "…"
-        suffix = f" · {_esc(text)}" if text else ""
-        lines.append(f"      {when} KST ({left}){suffix}")
+    timed = [w for w in wakes if w.kind != "conditional"]
+    watching = [w for w in wakes if w.kind == "conditional"]
+    blocks = []
+    if timed:
+        plural = "wake" if len(timed) == 1 else "wakes"
+        lines = [f"   ⏰ {len(timed)} {plural}"]
+        for wake in timed[:_MAX_WAKE_LINES]:
+            when = _kst_clock(wake.fires_at)
+            left = format_elapsed(max(0, wake.seconds_left(now)))
+            suffix = _message_suffix(wake.message)
+            lines.append(f"      {when} KST ({left}){suffix}")
+        hidden = len(timed) - _MAX_WAKE_LINES
+        if hidden > 0:
+            lines.append(f"      +{hidden} more")
+        blocks.append("\n".join(lines))
+    if watching:
+        # A different symbol: these fire when something becomes true, and the
+        # time shown is only the latest they can fire (their timeout).
+        lines = [f"   👀 {len(watching)} watching"]
+        for wake in watching[:_MAX_WAKE_LINES]:
+            left = format_elapsed(max(0, wake.seconds_left(now)))
+            name = Path(wake.flag).name if wake.flag else "flag"
+            suffix = _message_suffix(wake.message)
+            lines.append(f"      {_esc(name)} · timeout {left}{suffix}")
+        hidden = len(watching) - _MAX_WAKE_LINES
+        if hidden > 0:
+            lines.append(f"      +{hidden} more")
+        blocks.append("\n".join(lines))
+    return "\n".join(blocks)
 
-    hidden = len(wakes) - _MAX_WAKE_LINES
-    if hidden > 0:
-        lines.append(f"      +{hidden} more")
-    return "\n".join(lines)
+
+def _message_suffix(message: str) -> str:
+    """` · <message>` shortened to one banner line, or nothing if empty."""
+    text = _one_line(message)
+    if len(text) > _MAX_WAKE_MESSAGE:
+        text = text[: _MAX_WAKE_MESSAGE - 1] + "…"
+    return f" · {_esc(text)}" if text else ""
 
 
 def _one_line(text: str) -> str:

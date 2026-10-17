@@ -121,3 +121,45 @@ def test_scan_quietly_swallows_errors(monkeypatch):
     monkeypatch.setattr(pw, "scan", lambda *a, **k: 1 / 0)
 
     assert scan_quietly("main") == []
+
+
+# --- conditional wakes (wake_when.sh) ---------------------------------------
+
+
+def write_conditional(root, pid, *, timeout=3600, bot="main", flag="/tmp/job.done",
+                      message="RELAY: done?", started_after_boot=100.0):
+    d = write_proc(root, pid, message=message, started_after_boot=started_after_boot,
+                   cmdline=f"bash\0-c\0while :; do sleep 10; done\0"
+                           f"conditional wake (bot={bot} timeout={timeout}s)\0")
+    (d / "environ").write_text(
+        f"PATH=/usr/bin\0WAKE_MESSAGE={message}\0WAKE_FLAG={flag}\0"
+    )
+    return d
+
+
+def test_a_conditional_wake_is_found_with_its_flag_and_timeout(proc):
+    write_conditional(proc, 9, timeout=3600, flag="/tmp/train.done",
+                      started_after_boot=100.0)
+
+    (wake,) = scan(proc=proc)
+
+    assert wake.kind == "conditional"
+    assert wake.flag == "/tmp/train.done"
+    assert wake.bot_id == "main"
+    assert wake.fires_at == BOOT + 100 + 3600  # the latest it can fire
+
+
+def test_timed_and_conditional_wakes_are_listed_together(proc):
+    write_proc(proc, 1, delay=60, started_after_boot=10.0)
+    write_conditional(proc, 2, timeout=120, started_after_boot=10.0)
+
+    kinds = {w.pid: w.kind for w in scan(proc=proc)}
+
+    assert kinds == {1: "timed", 2: "conditional"}
+
+
+def test_a_conditional_wake_respects_the_bot_filter(proc):
+    write_conditional(proc, 1, bot="bot4")
+
+    assert scan(bot_id="main", proc=proc) == []
+    assert len(scan(bot_id="bot4", proc=proc)) == 1

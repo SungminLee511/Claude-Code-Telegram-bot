@@ -597,3 +597,31 @@ def test_the_context_size_survives_a_restart():
     header = build_header(after)
     assert "442k tok" in header
     assert "msg" not in header
+
+
+def cond(fires_in, flag="/tmp/train.done", message="RELAY: finished?", pid=2):
+    return PendingWake(
+        pid=pid, bot_id="main", message=message, fires_at=1000.0 + fires_in,
+        kind="conditional", flag=flag,
+    )
+
+
+def test_a_conditional_wake_has_its_own_symbol_and_shows_the_flag_and_timeout(wakes):
+    wakes(cond(3600))
+
+    out = lines()
+
+    assert "👀 1 watching" in out
+    assert "train.done" in out
+    assert "timeout" in out
+    assert "⏰" not in out
+
+
+def test_timed_and_conditional_wakes_get_separate_sections(wakes):
+    wakes(wake(60, "later"), cond(3600))
+
+    out = lines()
+
+    assert "⏰ 1 wake" in out
+    assert "👀 1 watching" in out
+    assert out.index("⏰") < out.index("👀")
