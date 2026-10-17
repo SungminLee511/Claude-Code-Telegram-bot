@@ -127,6 +127,69 @@ Stop conditions:
 
 For short experiments under 3 minutes, wait inline. For long experiments over 3 minutes, use Pattern A. The wake mechanism avoids repetitive "Done?" or "Proceed next" messages.
 
+## Conditional wakes (`wake_when.sh`)
+
+A conditional wake fires when a **flag file turns true**, or when its **timeout** passes, whichever comes first. Waiting costs nothing: nothing is sent to Claude until it fires.
+
+**When to use it**
+- **Preferred for error wakes**: be woken the moment a job crashes or stalls, not at a guessed time.
+- **Preferred when the ETA is ambiguous**: you cannot predict how long the job will run, so a fixed-delay wake would be too early or too late.
+- **Normal waiting relays stay exactly as before**: when the ETA is predictable, keep using `wake_after.sh` (Pattern A for a long experiment, Pattern B for step-relays). Do not switch those to `wake_when.sh`.
+
+Helper script: `<bot_repo>/wake_when.sh`
+
+```bash
+./wake_when.sh --flag <path> --timeout <duration> --message "<wake message>" [--log <path>] [--bot <BOT_ID>]
+```
+
+| Option | Meaning |
+|---|---|
+| `--flag` | The file to watch. The condition is met when it exists and holds `true` or `1` (case and whitespace ignored). Anything else, including `false`, empty, or missing, means not met. |
+| `--timeout` | **Required. There is no default; you always choose it.** Seconds, or with a suffix: `90`, `30m`, `6h`, `2d`. When it passes, the wake fires anyway, in case something went wrong (for example the job died before it could write the flag). Pick a generous upper bound. |
+| `--message` | The prompt you receive when it fires. It is prefixed with why: `[condition met: <flag> is true]` or `[TIMED OUT after <duration>: <flag> never became true]`. |
+| `--log` | Optional. The last 20 lines of this file are appended to the wake, so you see the job's state immediately. |
+| `--bot` | Which bot wakes. Defaults to `$BOT_ID`, then `main`. |
+
+How it works:
+- The script runs detached (`nohup`) and checks the flag every **10 seconds**. It only reads the first bytes of that one file. It never runs a command, so there is nothing to hang or inject.
+- **It fires once and stops.** If you still need to watch after a wake, set it again from the wake.
+- Delivery goes through `wake_after.sh`, so the chat id and per-bot spool behave the same.
+- It counts as Pattern A (a long-experiment auto-wake): it does **not** count against a relay's max turns or max time.
+- The banner lists it under a separate symbol, `👀 N watching`, with the flag name and the time left before its timeout.
+
+**The job decides the condition; the flag only reports it.** Compute the boolean yourself and write it to the file.
+
+1. **Always reset the flag first.** A stale `true` from an earlier run would fire immediately.
+   ```bash
+   rm -f /tmp/train.done
+   ```
+2. **Job finished (success or failure).** Have the job write the flag when it exits:
+   ```bash
+   nohup bash -c 'python train.py > train.log 2>&1; echo true > /tmp/train.done' > /dev/null 2>&1 &
+   ./wake_when.sh --flag /tmp/train.done --timeout 12h \
+       --message "Training exited. Check train.log, push results if it succeeded." --log train.log
+   ```
+3. **Error wake.** A small checker writes the flag as soon as the log shows a problem. The wake carries the log tail:
+   ```bash
+   rm -f /tmp/train.error
+   nohup bash -c 'while sleep 30; do grep -q "Traceback\|CUDA out of memory" train.log && echo true > /tmp/train.error && break; done' > /dev/null 2>&1 &
+   ./wake_when.sh --flag /tmp/train.error --timeout 12h \
+       --message "train.log shows an error. Diagnose and fix." --log train.log
+   ```
+   If the job simply finishes with no error, this wake fires at the timeout. That is expected: check the job state, then continue.
+4. **Stalled job.** Write the flag when the log has not changed for 10 minutes:
+   ```bash
+   rm -f /tmp/train.stalled
+   nohup bash -c 'while sleep 60; do [ $(( $(date +%s) - $(stat -c %Y train.log) )) -gt 600 ] && echo true > /tmp/train.stalled && break; done' > /dev/null 2>&1 &
+   ./wake_when.sh --flag /tmp/train.stalled --timeout 12h --message "train.log has not changed for 10 minutes." --log train.log
+   ```
+
+When a conditional wake arrives:
+- `[condition met: ...]`: the flag was set. Act on the message and the log tail.
+- `[TIMED OUT ...]`: **do not assume failure.** The job may still be running, finished without writing the flag, or died. Check the process and the log, then decide. If it is still running and still needs watching, set a new conditional wake.
+
+To cancel one: `pgrep -af "conditional wake"` shows the watchers (with the bot id); `kill <pid>` stops it.
+
 ## Relay kill-switch (max time / max turns)
 
 For Pattern B relay-style use of `wake_after.sh`, the user may specify max-time and/or max-turn limits at relay start. Examples:
