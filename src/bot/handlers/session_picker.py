@@ -189,6 +189,68 @@ def _size_text(info: SessionInfo) -> str:
     return f"{format_tokens(tokens)}{suffix}"
 
 
+def _saved_choices(kind: str) -> Dict[str, str]:
+    """Every bot's remembered per-session `model` / `effort`, merged.
+
+    Transcripts are shared but each bot keeps its own choice files, so a
+    session run by another bot is only found by reading all of them.
+    """
+    from ..utils.choice_store import ChoiceStore
+
+    merged: Dict[str, str] = {}
+    try:
+        paths = sorted(DB_DIR.glob(f"session_{kind}s_*.json"))
+    except OSError:
+        return merged
+    for path in paths:
+        for session_id, value in ChoiceStore(path).all().items():
+            merged.setdefault(session_id, value)
+    return merged
+
+
+def _defaults(context: ContextTypes.DEFAULT_TYPE) -> Dict[str, Optional[str]]:
+    """This bot's configured model and effort, for sessions with no choice."""
+    settings = context.bot_data.get("settings")
+    return {
+        "model": getattr(settings, "claude_model", None) if settings else None,
+        "effort": getattr(settings, "claude_effort", None) if settings else None,
+    }
+
+
+def _detail_bits(
+    info: SessionInfo,
+    owners: Optional[Dict[str, str]],
+    defaults: Optional[Dict[str, Optional[str]]] = None,
+    models_by_session: Optional[Dict[str, str]] = None,
+    efforts_by_session: Optional[Dict[str, str]] = None,
+) -> str:
+    """The session's detail line, exactly as the reply banner words it.
+
+    size (compactions) · model · effort · bot. The model is the one that wrote
+    the last reply, the same thing the banner reports; failing that the
+    session's saved choice, then the configured default.
+    """
+    from ..utils import efforts, models
+    from ..utils.session_header import detail_line
+    from ..utils.transcript_stats import last_model
+
+    defaults = defaults or {}
+    sid = info.session_id
+    try:
+        actual = last_model(info.path)
+    except Exception as exc:  # a listing must not die over decoration
+        logger.debug("session_picker: model lookup failed", error=str(exc))
+        actual = None
+    model = models.label_for(
+        actual or (models_by_session or {}).get(sid) or defaults.get("model")
+    )
+    effort = efforts.label_for(
+        (efforts_by_session or {}).get(sid) or defaults.get("effort")
+    )
+    bot = (owners or {}).get(sid, "?")
+    return detail_line(_size_text(info), model, effort, bot)
+
+
 def _page_text(
     sessions: List[SessionInfo],
     page: int,
@@ -197,12 +259,16 @@ def _page_text(
     query: str,
     owners: Optional[Dict[str, str]] = None,
     hidden_mode: bool = False,
+    defaults: Optional[Dict[str, Optional[str]]] = None,
 ) -> str:
     title = "🙈 <b>Hidden sessions</b>" if hidden_mode else "🗂 <b>Sessions</b>"
     header = f"{title} — page {page + 1}/{max(1, total_pages)}"
     if query:
         header += f"  (filter: <code>{_esc(query)}</code>)"
     lines = [header, ""]
+
+    models_by_session = _saved_choices("model")
+    efforts_by_session = _saved_choices("effort")
 
     start = page * PAGE_SIZE
     for offset, info in enumerate(sessions[start : start + PAGE_SIZE], start=1):
@@ -212,9 +278,10 @@ def _page_text(
             f"{_esc(_started_suffix(info))}"
         )
         lines.append(
-            f"    {_size_text(info)} · "
-            f"{info.size_text()} · {info.age_text()} · "
-            f"{_esc(_owner_text(owners, info.session_id))}"
+            "    "
+            + _detail_bits(
+                info, owners, defaults, models_by_session, efforts_by_session
+            )
         )
     if not sessions:
         lines.append("<i>No sessions found.</i>")
@@ -315,6 +382,7 @@ async def sessions_command(
         query,
         session_owners(context),
         hidden_mode,
+        _defaults(context),
     )
     if not show_all and not hidden_mode and len(sessions) >= MAX_SESSIONS:
         text += f"\n<i>Showing last {MAX_SESSIONS} — /sessions all for more.</i>"
@@ -326,14 +394,27 @@ async def sessions_command(
     )
 
 
-def _detail_text(info: SessionInfo, current_id: Optional[str], bot_label: str) -> str:
+def _detail_text(
+    info: SessionInfo,
+    current_id: Optional[str],
+    bot_label: str,
+    owners: Optional[Dict[str, str]] = None,
+    defaults: Optional[Dict[str, Optional[str]]] = None,
+) -> str:
     marker = " ⭐ <i>current</i>" if info.session_id == current_id else ""
     lines = [
         f"<b>{_esc(info.display_name)}</b>"
         f"{_esc(_started_suffix(info))}{marker}",
         "",
         f"<code>{_esc(info.session_id)}</code>",
-        f"{_size_text(info)} · {info.size_text()} · {info.age_text()}",
+        _detail_bits(
+            info,
+            owners,
+            defaults,
+            _saved_choices("model"),
+            _saved_choices("effort"),
+        ),
+        f"{info.size_text()} · {info.age_text()}",
         f"cwd <code>{_esc(info.cwd or '?')}</code> · {bot_label}",
     ]
     if info.last_prompt:
@@ -416,6 +497,7 @@ async def sessions_callback(
                 context.user_data.get(_QUERY_KEY, ""),
                 session_owners(context),
                 context.user_data.get(_HIDDEN_KEY, False),
+                _defaults(context),
             ),
             parse_mode="HTML",
             reply_markup=_page_keyboard(sessions, page, total_pages),
@@ -433,7 +515,9 @@ async def sessions_callback(
     if action == "open":
         label = await _bot_label(context, info.session_id)
         await query.edit_message_text(
-            _detail_text(info, current_id, label),
+            _detail_text(
+                info, current_id, label, session_owners(context), _defaults(context)
+            ),
             parse_mode="HTML",
             reply_markup=_detail_keyboard(arg, page, hidden_mode),
         )
@@ -478,6 +562,7 @@ async def sessions_callback(
                 context.user_data.get(_QUERY_KEY, ""),
                 session_owners(context),
                 hidden_mode,
+                _defaults(context),
             ),
             parse_mode="HTML",
             reply_markup=_page_keyboard(sessions, page, total_pages),

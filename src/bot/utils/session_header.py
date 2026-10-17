@@ -186,6 +186,25 @@ def format_tokens(tokens: int) -> str:
 _format_tokens = format_tokens
 
 
+def detail_line(
+    size: str, model: Optional[str], effort: Optional[str], bot: str
+) -> str:
+    """`442k tok (3) · sonnet-5-5 · auto · bot2` — the banner's detail line.
+
+    One function so the reply banner and the `/sessions` list cannot drift
+    apart: both build this line from it. The result is HTML-safe.
+    """
+    bits = []
+    if size:
+        bits.append(_esc(size))
+    if model:
+        bits.append(_esc(model))
+    if effort:
+        bits.append(_esc(effort))
+    bits.append(_esc(bot))
+    return " · ".join(bits)
+
+
 def started_suffix(info, now: Optional[float] = None) -> str:
     """` (14:33)` for a session's start, or empty when it cannot be read."""
     started = _started_text(info, now)
@@ -264,23 +283,18 @@ def build_header(context, claude_response=None) -> Optional[str]:
     # The session id and the working directory are deliberately absent: the
     # title already says which conversation this is, and the directory is
     # almost always the same one, so both were noise on every single reply.
-    bits = []
+    size = ""
     tokens = _context_tokens(context, session_id, claude_response)
     if tokens:
-        bits.append(_format_tokens(tokens) + _compaction_suffix(info))
+        size = _format_tokens(tokens) + _compaction_suffix(info)
     elif message_count:
         # Before the first reply of a restarted process there is no token
         # count yet; the turn count is better than an empty space.
-        bits.append(f"{message_count} msg")
+        size = f"{message_count} msg"
     model = _model_label(context, claude_response)
-    if model:
-        bits.append(_esc(model))
     effort = _effort_label(context)
-    if effort:
-        bits.append(_esc(effort))
-    bits.append(_esc(bot_id))
 
-    header = f"<b>{_esc(title)}</b>\n   {' · '.join(bits)}"
+    header = f"<b>{_esc(title)}</b>\n   {detail_line(size, model, effort, bot_id)}"
     usage = _usage_line()
     if usage:
         # One limit per line, each indented to sit under the detail line.

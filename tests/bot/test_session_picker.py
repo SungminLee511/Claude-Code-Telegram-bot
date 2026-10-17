@@ -121,8 +121,8 @@ def test_owning_bot_is_shown_per_entry():
     owners = {sessions[0].session_id: "bot2"}
     text = sp._page_text(sessions, 0, 1, None, "", owners)
 
-    assert "bot bot2" in text
-    assert "bot ?" in text  # unknown owner still renders
+    assert "· bot2" in text
+    assert "· ?" in text  # unknown owner still renders
 
 
 def test_current_session_is_starred():
@@ -519,3 +519,115 @@ def test_corrupt_hidden_file_reads_as_empty(isolated_db_dir):
     isolated_db_dir.mkdir(parents=True, exist_ok=True)
     (isolated_db_dir / sp.HIDDEN_FILE_NAME).write_text("{not json")
     assert sp.load_hidden() == set()
+
+
+# --- the list says what the reply banner says --------------------------------
+
+
+def _assistant_with_model(tokens, model, sidechain=False):
+    import json as _json
+
+    entry = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "model": model,
+            "usage": {"input_tokens": tokens},
+        },
+    }
+    if sidechain:
+        entry["isSidechain"] = True
+    return _json.dumps(entry)
+
+
+def _fresh(monkeypatch, tmp_path):
+    from src.bot.utils import compactions, transcript_stats
+
+    compactions.reset_cache()
+    transcript_stats.reset_cache()
+    # No saved choices anywhere unless a test writes some.
+    monkeypatch.setattr(sp, "DB_DIR", tmp_path / "data")
+
+
+def test_the_list_line_matches_the_banner_line(tmp_path, monkeypatch):
+    """size (compactions) · model · effort · bot — the same four, same order."""
+    from src.bot.utils.session_header import detail_line
+
+    _fresh(monkeypatch, tmp_path)
+    info = _info(
+        tmp_path,
+        [_summary(), _assistant_with_model(442_000, "claude-sonnet-5-5")],
+    )
+
+    line = sp._detail_bits(info, {info.session_id: "bot2"})
+
+    assert line == detail_line("442k tok (1)", "sonnet-5-5", "auto", "bot2")
+    assert line == "442k tok (1) · sonnet-5-5 · auto · bot2"
+
+
+def test_the_model_is_the_one_that_wrote_the_last_reply(tmp_path, monkeypatch):
+    _fresh(monkeypatch, tmp_path)
+    info = _info(
+        tmp_path,
+        [
+            _assistant_with_model(1_000, "claude-opus-5-5"),
+            _assistant_with_model(2_000, "claude-haiku-5-5", sidechain=True),
+            _assistant_with_model(3_000, "<synthetic>"),
+        ],
+    )
+
+    # The sub-agent turn and the CLI's placeholder are not the model answering.
+    assert "opus-5-5" in sp._detail_bits(info, {})
+
+
+def test_with_no_model_in_the_transcript_the_saved_choice_then_the_default(
+    tmp_path, monkeypatch
+):
+    _fresh(monkeypatch, tmp_path)
+    info = _info(tmp_path, [_assistant(5_000)])
+
+    saved = {info.session_id: "haiku"}
+    assert "haiku" in sp._detail_bits(info, {}, {"model": "opus"}, saved)
+    assert "opus" in sp._detail_bits(info, {}, {"model": "opus"})
+
+
+def test_effort_is_the_sessions_saved_choice_else_default_else_auto(
+    tmp_path, monkeypatch
+):
+    _fresh(monkeypatch, tmp_path)
+    info = _info(tmp_path, [_assistant(5_000)])
+
+    assert "· high ·" in sp._detail_bits(
+        info, {}, None, None, {info.session_id: "high"}
+    )
+    assert "· xhigh ·" in sp._detail_bits(info, {}, {"effort": "xhigh"})
+    assert "· auto ·" in sp._detail_bits(info, {})
+
+
+def test_saved_choices_are_read_from_every_bots_file(tmp_path, monkeypatch):
+    from src.bot.utils.choice_store import ChoiceStore
+
+    _fresh(monkeypatch, tmp_path)
+    data = tmp_path / "data"
+    ChoiceStore(data / "session_efforts_main.json").set("s1", "low")
+    ChoiceStore(data / "session_efforts_bot2.json").set("s2", "max")
+
+    assert sp._saved_choices("effort") == {"s1": "low", "s2": "max"}
+
+
+def test_the_list_no_longer_carries_file_size_and_age(tmp_path, monkeypatch):
+    _fresh(monkeypatch, tmp_path)
+    sessions = [make_info(0)]
+
+    text = sp._page_text(sessions, 0, 1, None, "")
+
+    assert "1 KB" not in text and "ago" not in text
+
+
+def test_the_detail_view_leads_with_the_same_line(tmp_path, monkeypatch):
+    _fresh(monkeypatch, tmp_path)
+    info = _info(tmp_path, [_assistant_with_model(9_000, "claude-sonnet-5-5")])
+
+    text = sp._detail_text(info, None, "bot bot2", {info.session_id: "bot2"})
+
+    assert "9k tok · sonnet-5-5 · auto · bot2" in text

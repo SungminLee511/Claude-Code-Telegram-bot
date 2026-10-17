@@ -69,6 +69,10 @@ class ChoiceStore:
             return None
         return self._read().get(session_id)
 
+    def all(self) -> Dict[str, str]:
+        """Every session's choice, session id -> value."""
+        return self._read()
+
     def set(self, session_id: str, model_id: str) -> None:
         """Pin a session to a model from now on."""
         if not session_id:

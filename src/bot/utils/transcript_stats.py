@@ -101,6 +101,63 @@ def context_tokens(transcript_path: Optional[str]) -> Optional[int]:
     return found
 
 
+# path -> (size when read, answer)
+_model_cache: Dict[str, Tuple[int, Optional[str]]] = {}
+
+
+def last_model(transcript_path: Optional[str]) -> Optional[str]:
+    """The model that wrote the session's last reply, or None if unknown.
+
+    This is what the live banner reports for a fresh reply, so the session list
+    can say the same thing for sessions nobody is running. Sub-agent turns and
+    the CLI's own placeholder entries (`<synthetic>`) are skipped: neither is
+    the model answering you.
+    """
+    if not transcript_path:
+        return None
+    try:
+        path = Path(transcript_path)
+        size = path.stat().st_size
+    except OSError:
+        return None
+
+    cached = _model_cache.get(transcript_path)
+    if cached is not None and cached[0] == size:
+        return cached[1]
+
+    found: Optional[str] = None
+    try:
+        with path.open("rb") as handle:
+            if size > _TAIL_BYTES:
+                handle.seek(size - _TAIL_BYTES)
+                handle.readline()
+            lines = handle.read().splitlines()
+    except OSError:
+        _model_cache[transcript_path] = (size, None)
+        return None
+
+    for line in reversed(lines):
+        if b'"model"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(entry, dict) or entry.get("isSidechain"):
+            continue
+        message = entry.get("message")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        model = message.get("model")
+        if isinstance(model, str) and model and not model.startswith("<"):
+            found = model
+            break
+
+    _model_cache[transcript_path] = (size, found)
+    return found
+
+
 def reset_cache() -> None:
     """Forget every remembered answer — for tests."""
     _cache.clear()
+    _model_cache.clear()
