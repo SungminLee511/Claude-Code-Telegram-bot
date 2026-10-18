@@ -1,10 +1,8 @@
 """After a usage limit stops a run, resume automatically once it resets."""
 
 import asyncio
-import time
 from types import SimpleNamespace
 
-import pytest
 from claude_agent_sdk.types import RateLimitEvent, RateLimitInfo
 
 from src.bot import orchestrator as orch_mod
