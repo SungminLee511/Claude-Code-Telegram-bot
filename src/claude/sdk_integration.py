@@ -28,7 +28,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk._errors import MessageParseError
 from claude_agent_sdk._internal.message_parser import parse_message
-from claude_agent_sdk.types import StreamEvent
+from claude_agent_sdk.types import RateLimitEvent, StreamEvent
 
 from ..config.settings import Settings
 from ..security.validators import SecurityValidator
@@ -66,6 +66,10 @@ class ClaudeResponse:
     # True when Claude wrote no reply text at all. `content` may still be a
     # stand-in ("Task completed. Tools used: …"), so this is the real signal.
     no_text: bool = False
+    # The run was stopped by a usage limit. `limit_resets_at` is when that
+    # window reopens (unix seconds), when the CLI said so.
+    limit_hit: bool = False
+    limit_resets_at: Optional[float] = None
     # Size of the conversation as the model last saw it. Not a running total:
     # every turn resends the whole history, so the newest turn's input count
     # *is* the current context size.
@@ -75,6 +79,36 @@ class ClaudeResponse:
     # choice and no default is pinned — otherwise the model name would be
     # dropped from the footer even though a real model clearly answered.
     model_id: Optional[str] = None
+
+
+_LIMIT_TEXT = ("usage limit", "hit your limit", "limit reached")
+
+
+def _limit_hit(
+    messages: List[Any], result_is_error: bool = False, content: str = ""
+) -> "tuple[bool, Optional[float]]":
+    """Whether a usage limit stopped this run, and when its window reopens.
+
+    The CLI announces it as a rate-limit event whose status is `rejected`. If
+    it did not (older CLI, odd stream), an error result that reads like a limit
+    message still counts, just without a reset time.
+    """
+    hit = False
+    resets: Optional[float] = None
+    for message in messages:
+        if not isinstance(message, RateLimitEvent):
+            continue
+        info = message.rate_limit_info
+        # `overage` is the pay-as-you-go pool; its refusal is not "you are out".
+        if info.status != "rejected" or info.rate_limit_type == "overage":
+            continue
+        hit = True
+        if info.resets_at:
+            resets = float(info.resets_at)
+    if not hit and result_is_error:
+        lowered = (content or "").lower()
+        hit = any(phrase in lowered for phrase in _LIMIT_TEXT)
+    return hit, resets
 
 
 def _last_model(messages: List[Any]) -> Optional[str]:
@@ -570,6 +604,7 @@ class ClaudeSDKManager:
             tools_used: List[Dict[str, Any]] = []
             claude_session_id = None
             result_content = None
+            result_is_error = False
             hit_turn_limit = False
             for message in messages:
                 if isinstance(message, ResultMessage):
@@ -579,6 +614,7 @@ class ClaudeSDKManager:
                     cost = getattr(message, "total_cost_usd", 0.0) or 0.0
                     claude_session_id = getattr(message, "session_id", None)
                     result_content = getattr(message, "result", None)
+                    result_is_error = bool(getattr(message, "is_error", False))
                     current_time = asyncio.get_event_loop().time()
                     for msg in messages:
                         if isinstance(msg, AssistantMessage):
@@ -658,6 +694,10 @@ class ClaudeSDKManager:
                 tools_summary = ", ".join(unique_tool_names) or "unknown"
                 content = TASK_COMPLETED_MSG.format(tools_summary=tools_summary)
 
+            limit_hit, limit_resets_at = _limit_hit(
+                messages, result_is_error, content
+            )
+
             return ClaudeResponse(
                 content=content,
                 session_id=final_session_id,
@@ -673,6 +713,8 @@ class ClaudeSDKManager:
                 tools_used=tools_used,
                 interrupted=interrupted,
                 no_text=no_text,
+                limit_hit=limit_hit,
+                limit_resets_at=limit_resets_at,
                 context_tokens=_context_tokens(messages),
                 model_id=_last_model(messages),
             )

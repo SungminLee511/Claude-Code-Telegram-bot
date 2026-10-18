@@ -11,6 +11,7 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -35,7 +36,7 @@ from ..config.settings import Settings
 from .utils.draft_streamer import DraftStreamer, generate_draft_id
 from .utils.durations import format_elapsed
 from .utils.html_format import escape_html
-from .utils import outbox, uploads
+from .utils import outbox, uploads, usage_limits
 from .handlers import branch_command, effort_command, model_command
 from .utils.progress_registry import ProgressRegistry
 from .utils.session_header import attach_header
@@ -139,6 +140,18 @@ EMPTY_REPLY_WAKE_TEXT = (
     "Answer my last message now."
 )
 _WAKE_SCRIPT = Path(__file__).resolve().parents[2] / "wake_after.sh"
+
+# After a usage limit stops a run, resume this long after the window reopens.
+LIMIT_RESUME_BUFFER_SECONDS = 60
+# Consecutive limit-resumes before giving up (a misread reset time would
+# otherwise retry forever).
+MAX_LIMIT_RESUMES = 3
+# Never schedule further out than this; a reset that far away is a misreading.
+MAX_LIMIT_RESUME_DELAY_SECONDS = 8 * 24 * 3600
+LIMIT_RESUME_TEXT = (
+    "RESUME: the usage limit has reset. Carry on with the task you were doing; "
+    "if my last message got no answer, answer it now."
+)
 
 
 class MessageOrchestrator:
@@ -553,6 +566,96 @@ class MessageOrchestrator:
             [[InlineKeyboardButton("Stop", callback_data=f"stop:{user_id}")]]
         )
 
+    def _spawn_wake(self, update: Update, seconds: int, text: str) -> None:
+        """Schedule a wake for this chat through `wake_after.sh`."""
+        chat = update.effective_chat
+        env = dict(os.environ)
+        if chat is not None:
+            env["WAKE_CHAT_ID"] = str(chat.id)
+        env["INJECT_DIR"] = str(self.settings.inject_dir)
+        subprocess.Popen(
+            ["bash", str(_WAKE_SCRIPT), str(int(seconds)), text, str(self.settings.bot_id)],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    @staticmethod
+    def _reset_from_usage() -> Optional[float]:
+        """When the exhausted window(s) reopen, read from the usage endpoint.
+
+        Used when the CLI did not say. Only windows that are actually full
+        count, and the latest of them wins, since all must clear to resume.
+        """
+        usage = usage_limits.current()
+        now = time.time()
+        windows = [
+            (usage.five_hour, usage.five_hour_resets),
+            (usage.weekly, usage.weekly_resets),
+            *[(pct, resets) for _name, pct, resets in usage.scoped],
+        ]
+        full = [
+            resets
+            for pct, resets in windows
+            if pct is not None and pct >= 100 and resets and resets > now
+        ]
+        return max(full) if full else None
+
+    async def _schedule_limit_resume(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        claude_response: Any = None,
+        error: Optional[BaseException] = None,
+    ) -> None:
+        """If a usage limit stopped the run, resume automatically after it resets.
+
+        A wake is scheduled for the reset time plus a one-minute buffer, and
+        you are told when. Reset time comes from the CLI's own limit event, else
+        from the usage endpoint. Capped at MAX_LIMIT_RESUMES in a row; any run
+        that finishes normally resets the count. Never raises.
+        """
+        try:
+            if claude_response is not None:
+                if not getattr(claude_response, "limit_hit", False):
+                    context.user_data["limit_resume_attempts"] = 0
+                    return
+            elif error is None or "usage limit" not in str(error).lower():
+                return
+
+            tries = int(context.user_data.get("limit_resume_attempts", 0))
+            if tries >= MAX_LIMIT_RESUMES:
+                logger.warning("Usage limit keeps stopping runs; no more auto-resumes")
+                context.user_data["limit_resume_attempts"] = 0
+                return
+
+            now = time.time()
+            reset_at = getattr(claude_response, "limit_resets_at", None)
+            if not reset_at or reset_at <= now:
+                reset_at = await asyncio.to_thread(self._reset_from_usage)
+            if not reset_at:
+                logger.warning("Usage limit hit but the reset time is unknown")
+                return
+
+            delay = int(max(0.0, reset_at - now)) + LIMIT_RESUME_BUFFER_SECONDS
+            if delay > MAX_LIMIT_RESUME_DELAY_SECONDS:
+                logger.warning("Usage limit reset is implausibly far away", delay=delay)
+                return
+
+            context.user_data["limit_resume_attempts"] = tries + 1
+            self._spawn_wake(update, delay, LIMIT_RESUME_TEXT)
+
+            moment = datetime.fromtimestamp(now + delay, tz=timezone(timedelta(hours=9)))
+            when = moment.strftime("%a %H:%M" if delay > 20 * 3600 else "%H:%M")
+            await update.effective_message.reply_text(
+                f"⏳ Usage limit reached. Resuming automatically at {when} KST "
+                f"(in {format_elapsed(delay)}, includes a 1 min buffer)."
+            )
+            logger.info("Limit resume scheduled", delay=delay, attempt=tries + 1)
+        except Exception as exc:
+            logger.warning("Could not schedule the limit resume", error=str(exc))
+
     def _wake_if_empty(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, claude_response: Any
     ) -> None:
@@ -565,6 +668,8 @@ class MessageOrchestrator:
         Never raises: this is a convenience and must not cost the reply.
         """
         try:
+            if getattr(claude_response, "limit_hit", False):
+                return  # a usage limit is not Claude choosing to say nothing
             empty = bool(getattr(claude_response, "no_text", False)) or not (
                 getattr(claude_response, "content", "") or ""
             ).strip()
@@ -580,24 +685,7 @@ class MessageOrchestrator:
                 return
             context.user_data["empty_reply_retries"] = tries + 1
 
-            chat = update.effective_chat
-            env = dict(os.environ)
-            if chat is not None:
-                env["WAKE_CHAT_ID"] = str(chat.id)
-            env["INJECT_DIR"] = str(self.settings.inject_dir)
-            subprocess.Popen(
-                [
-                    "bash",
-                    str(_WAKE_SCRIPT),
-                    str(EMPTY_REPLY_WAKE_SECONDS),
-                    EMPTY_REPLY_WAKE_TEXT,
-                    str(self.settings.bot_id),
-                ],
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            self._spawn_wake(update, EMPTY_REPLY_WAKE_SECONDS, EMPTY_REPLY_WAKE_TEXT)
             logger.info("Empty reply: wake scheduled", attempt=tries + 1)
         except Exception as exc:
             logger.warning("Could not schedule the empty-reply wake", error=str(exc))
@@ -938,8 +1026,10 @@ class MessageOrchestrator:
                 formatted_messages, context, claude_response
             )
             self._wake_if_empty(update, context, claude_response)
+            await self._schedule_limit_resume(update, context, claude_response)
 
         except Exception as e:
+            await self._schedule_limit_resume(update, context, None, e)
             success = False
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
             from .handlers.common import _format_error_message
@@ -1142,6 +1232,7 @@ class MessageOrchestrator:
                 formatted_messages, context, claude_response
             )
             self._wake_if_empty(update, context, claude_response)
+            await self._schedule_limit_resume(update, context, claude_response)
 
             await self._close_progress(progress_msg)
 
@@ -1161,6 +1252,7 @@ class MessageOrchestrator:
 
 
         except Exception as e:
+            await self._schedule_limit_resume(update, context, None, e)
             from .handlers.common import _format_error_message
 
             await self._fail_progress(
@@ -1240,6 +1332,7 @@ class MessageOrchestrator:
             )
 
         except Exception as e:
+            await self._schedule_limit_resume(update, context, None, e)
             from .handlers.common import _format_error_message
 
             self._active_requests.pop(user_id, None)
@@ -1296,6 +1389,7 @@ class MessageOrchestrator:
             )
 
         except Exception as e:
+            await self._schedule_limit_resume(update, context, None, e)
             from .handlers.common import _format_error_message
 
             self._active_requests.pop(user_id, None)
@@ -1391,6 +1485,7 @@ class MessageOrchestrator:
         formatted_messages = formatter.format_claude_response(response_content)
         formatted_messages = attach_header(formatted_messages, context, claude_response)
         self._wake_if_empty(update, context, claude_response)
+        await self._schedule_limit_resume(update, context, claude_response)
 
         await self._close_progress(progress_msg)
 
