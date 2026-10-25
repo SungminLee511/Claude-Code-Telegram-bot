@@ -37,7 +37,7 @@ from .utils.draft_streamer import DraftStreamer, generate_draft_id
 from .utils.durations import format_elapsed
 from .utils.html_format import escape_html
 from .utils import outbox, uploads, usage_limits
-from .handlers import branch_command, effort_command, model_command
+from .handlers import effort_command, model_command
 from .utils.progress_registry import ProgressRegistry
 from .utils.session_header import attach_header
 
@@ -238,7 +238,6 @@ class MessageOrchestrator:
             ("repo", self.agentic_repo),
             ("model", model_command.model_command),
             ("effort", effort_command.effort_command),
-            ("branch", branch_command.branch_command),
             ("restart", admin_command.restart_command),
         ]
 
@@ -363,7 +362,6 @@ class MessageOrchestrator:
             BotCommand("rename", "Rename this session"),
             BotCommand("model", "Choose the model for this session"),
             BotCommand("effort", "Set thinking effort for this session"),
-            BotCommand("branch", "Continue on a copy, leaving this one intact"),
             BotCommand("restart", "Restart the bot"),
         ]
         return commands
@@ -950,10 +948,6 @@ class MessageOrchestrator:
         heartbeat = self._start_typing_heartbeat(chat)
 
         success = True
-        # `/branch` arms a fork for exactly one message; take the label now so
-        # a failed turn does not leave it armed for the next one.
-        branch_label = branch_command.disarm(context)
-        branched_from = context.user_data.get("claude_session_id")
         try:
             claude_response = await claude_integration.run_command(
                 prompt=message_text,
@@ -965,7 +959,6 @@ class MessageOrchestrator:
                 interrupt_event=interrupt_event,
                 model=model_command.current_model_id(context),
                 effort=effort_command.current_effort(context),
-                fork_session=bool(branch_label),
                 ask_user=self._make_asker(update),
             )
 
@@ -974,16 +967,6 @@ class MessageOrchestrator:
                 context.user_data["force_new_session"] = False
 
             context.user_data["claude_session_id"] = claude_response.session_id
-            if branch_label:
-                note = branch_command.finish(
-                    context, branch_label, branched_from,
-                    claude_response.session_id,
-                )
-                if note:
-                    try:
-                        await update.message.reply_text(note, parse_mode="HTML")
-                    except Exception:
-                        logger.debug("Branch note could not be sent")
             # A model picked before the session existed now has an id to
             # attach to.
             model_command.bind_pending(context, claude_response.session_id)

@@ -349,7 +349,6 @@ class ClaudeSDKManager:
         images: Optional[List[Dict[str, str]]] = None,
         model: Optional[str] = None,
         effort: Optional[str] = None,
-        fork_session: bool = False,
         ask_user: Optional[Any] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK.
@@ -404,7 +403,6 @@ class ClaudeSDKManager:
                 effort=effort or self.config.claude_effort or None,
                 # Replay the resumed history into a *new* session id instead
                 # of appending to the old one, leaving the original intact.
-                fork_session=fork_session,
                 # One Read of a screenshot exceeds the SDK's 1 MB default and
                 # kills the transport for the whole turn.
                 max_buffer_size=self.config.claude_max_buffer_mb * 1024 * 1024,

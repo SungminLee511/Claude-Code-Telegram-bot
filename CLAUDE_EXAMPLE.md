@@ -252,7 +252,7 @@ AskUserQuestion works over Telegram (rendered as buttons, plus an "Other" button
 # Telegram bot slash commands
 
 Handled by the bot, not by Claude (user-side; mention when relevant):
-- `/new` — fresh session. `/sessions` — browse/switch sessions. `/branch` — fork current session into a copy.
+- `/new` — fresh session. `/sessions` — browse/switch sessions.
 - `/model` — pick model for this session. `/effort` — set thinking effort for this session.
 - `/rename` — rename this session (forwarded to Claude Code).
 - `/restart` — restart the bot. `/start` — start. Hidden but typable: `/status`, `/verbose`, `/repo`.

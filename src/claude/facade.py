@@ -66,7 +66,6 @@ class ClaudeIntegration:
         images: Optional[List[Dict[str, str]]] = None,
         model: Optional[str] = None,
         effort: Optional[str] = None,
-        fork_session: bool = False,
         ask_user: Optional[Any] = None,
     ) -> ClaudeResponse:
         """Run Claude Code command with full integration.
@@ -124,7 +123,6 @@ class ClaudeIntegration:
                     images=images,
                     model=model,
                     effort=effort,
-                    fork_session=fork_session,
                     ask_user=ask_user,
                 )
             except (asyncio.TimeoutError, ClaudeTimeoutError):
@@ -177,7 +175,6 @@ class ClaudeIntegration:
                                 images=images,
                                 model=model,
                                 effort=effort,
-                                fork_session=fork_session,
                                 ask_user=ask_user,
                             )
                             logger.info(
@@ -268,7 +265,6 @@ class ClaudeIntegration:
         images: Optional[List[Dict[str, str]]] = None,
         model: Optional[str] = None,
         effort: Optional[str] = None,
-        fork_session: bool = False,
         ask_user: Optional[Any] = None,
     ) -> ClaudeResponse:
         """Execute command via SDK."""
@@ -282,7 +278,6 @@ class ClaudeIntegration:
             images=images,
             model=model,
             effort=effort,
-            fork_session=fork_session,
             ask_user=ask_user,
         )
 
