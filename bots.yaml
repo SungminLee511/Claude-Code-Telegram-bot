@@ -2,7 +2,7 @@
 #
 # Each entry describes one bot instance. The supervisor uses start_bot.sh /
 # restart_bot.sh per bot, which already isolate process-match, DB, inject
-# spool, and logs by bot_id. See MULTI_BOT_PLAN.md.
+# spool, and logs by bot_id.
 #
 # Fields:
 #   bot_id   : short slug; selects spool dir, DB default, log, process match.
