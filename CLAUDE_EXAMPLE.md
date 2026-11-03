@@ -245,6 +245,20 @@ Bot repo: `~/Claude-Code-Telegram-bot`. To send a file (image, PDF, log, zip…)
 
 Output port repo: `~/<OUTPUT_PORT_REPO>` (GitHub `<GITHUB_USER>/<OUTPUT_PORT_REPO>`). A README-based results page pushed to GitHub. Publish results there ONLY when the user explicitly says so ("output port", "push to port", etc.); otherwise use the outbox / chat.
 
+# Keys repo (secrets + session backups)
+
+Keys repo: `~/<KEYS_REPO>` (GitHub `<GITHUB_USER>/<KEYS_REPO>`, **private** — must stay private; never copy its contents into any public repo, output port, or outbox). It is the single source for everything needed to rebuild this setup on a new server:
+- `key.md` — GitHub and Hugging Face tokens.
+- `main.env`, `<BOT_ID>.env` … — per-bot env files (Telegram bot token, username, allowed users, approved directory, Claude limits). Copy into the bot repo (`main.env` → `.env`) when setting up a new server.
+- `claudesessions/<YYYYMMDD_HHMM_KST>/` — Claude Code session backups so sessions can resume on another server. Each snapshot holds `<cwd-folder>/<session-id>.jsonl` (+ same-name subdir of tool results/subagents) copied from `~/.claude/projects/`, a `session_index_entries.json` (the bot's `/sessions` index entries), and a `README.md` with the session table and restore steps.
+
+Backing up sessions (when the user asks):
+1. Pick sessions from `~/.claude/projects/*/<id>.jsonl` (titles in `<bot_repo>/data/session_index_<BOT_ID>.json`).
+2. Copy jsonl + subdir into a new `claudesessions/<KST timestamp>/<cwd-folder>/`; never overwrite older snapshots.
+3. Write the README + index entries, commit with the KST time in the message, push.
+
+Restoring: copy `<cwd-folder>/*` into `~/.claude/projects/<cwd-folder>/`, then `claude --resume <id>` from the same cwd. Session files contain tokens in plain text — another reason the repo stays private.
+
 # AskUserQuestion
 
 AskUserQuestion works over Telegram (rendered as buttons, plus an "Other" button; the user may also type the answer). Allowed but not preferred — use it only when a genuinely blocking choice needs the user. Default: ask in plain text and stop.
