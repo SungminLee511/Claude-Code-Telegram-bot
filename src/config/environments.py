@@ -10,7 +10,9 @@ class DevelopmentConfig:
     development_mode: bool = True
     log_level: str = "DEBUG"
     rate_limit_requests: int = 100  # More lenient for testing
-    claude_timeout_seconds: int = 7200  # 2 hours, allows long-running Claude tasks
+    # No claude_timeout_seconds here: it comes from CLAUDE_TIMEOUT_SECONDS in
+    # the bot's env file (default 7200). Overriding it here silently ignored
+    # the env file.
 
     @classmethod
     def as_dict(cls) -> Dict[str, Any]:

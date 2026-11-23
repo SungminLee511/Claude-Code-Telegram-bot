@@ -153,6 +153,19 @@ LIMIT_RESUME_TEXT = (
     "if my last message got no answer, answer it now."
 )
 
+# A turn killed by the SDK timeout (CLAUDE_TIMEOUT_SECONDS) is resumed with a
+# wake after this many seconds. The session itself is preserved on timeout.
+TIMEOUT_WAKE_SECONDS = 5
+# Consecutive timeouts that get auto-continued before giving up (a turn that
+# times out every time would otherwise be resumed forever, at your cost).
+MAX_TIMEOUT_RETRIES = 3
+TIMEOUT_WAKE_TEXT = (
+    "CONTINUE: your last turn was killed by the bot's request timeout. "
+    "Carry on with the task you were doing. Do not block a turn on long waits "
+    "or foreground subagents: run them in the background and end the turn "
+    "with a wake (wake_after.sh / wake_when.sh)."
+)
+
 
 class MessageOrchestrator:
     """Routes messages based on mode. Single entry point for all Telegram updates."""
@@ -688,6 +701,48 @@ class MessageOrchestrator:
         except Exception as exc:
             logger.warning("Could not schedule the empty-reply wake", error=str(exc))
 
+    @staticmethod
+    def _is_timeout_error(error: Optional[BaseException]) -> bool:
+        """True when the error is the SDK request timeout."""
+        if error is None:
+            return False
+        if type(error).__name__ == "ClaudeTimeoutError":
+            return True
+        text = str(error).lower()
+        return "claude sdk timed out" in text
+
+    def _wake_if_timeout(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        error: Optional[BaseException],
+    ) -> bool:
+        """Schedule a continue-wake when the SDK request timeout killed a turn.
+
+        Call with the error on failure, or with None after a run that finished,
+        which resets the count. Capped at MAX_TIMEOUT_RETRIES in a row.
+        Returns True when a wake was scheduled. Never raises.
+        """
+        try:
+            if error is None:
+                context.user_data["timeout_retries"] = 0
+                return False
+            if not self._is_timeout_error(error):
+                return False
+            tries = int(context.user_data.get("timeout_retries", 0))
+            if tries >= MAX_TIMEOUT_RETRIES:
+                logger.warning("Turns keep timing out; no more auto-continues")
+                context.user_data["timeout_retries"] = 0
+                return False
+            context.user_data["timeout_retries"] = tries + 1
+
+            self._spawn_wake(update, TIMEOUT_WAKE_SECONDS, TIMEOUT_WAKE_TEXT)
+            logger.info("Request timeout: continue wake scheduled", attempt=tries + 1)
+            return True
+        except Exception as exc:
+            logger.warning("Could not schedule the timeout wake", error=str(exc))
+            return False
+
     def _make_stream_callback(
         self,
         verbose_level: int,
@@ -1009,18 +1064,24 @@ class MessageOrchestrator:
                 formatted_messages, context, claude_response
             )
             self._wake_if_empty(update, context, claude_response)
+            self._wake_if_timeout(update, context, None)
             await self._schedule_limit_resume(update, context, claude_response)
 
         except Exception as e:
             await self._schedule_limit_resume(update, context, None, e)
+            timeout_wake = self._wake_if_timeout(update, context, e)
             success = False
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
             from .handlers.common import _format_error_message
             from .utils.formatting import FormattedMessage
 
-            formatted_messages = [
-                FormattedMessage(_format_error_message(e), parse_mode="HTML")
-            ]
+            error_text = _format_error_message(e)
+            if timeout_wake:
+                error_text += (
+                    f"\n\n🔁 Auto-continuing in {TIMEOUT_WAKE_SECONDS}s "
+                    "(session kept)."
+                )
+            formatted_messages = [FormattedMessage(error_text, parse_mode="HTML")]
         finally:
             heartbeat.cancel()
             self._active_requests.pop(user_id, None)
@@ -1216,6 +1277,7 @@ class MessageOrchestrator:
             )
             self._wake_if_empty(update, context, claude_response)
             await self._schedule_limit_resume(update, context, claude_response)
+            self._wake_if_timeout(update, context, None)
 
             await self._close_progress(progress_msg)
 
@@ -1236,6 +1298,7 @@ class MessageOrchestrator:
 
         except Exception as e:
             await self._schedule_limit_resume(update, context, None, e)
+            self._wake_if_timeout(update, context, e)
             from .handlers.common import _format_error_message
 
             await self._fail_progress(
@@ -1316,6 +1379,7 @@ class MessageOrchestrator:
 
         except Exception as e:
             await self._schedule_limit_resume(update, context, None, e)
+            self._wake_if_timeout(update, context, e)
             from .handlers.common import _format_error_message
 
             self._active_requests.pop(user_id, None)
@@ -1373,6 +1437,7 @@ class MessageOrchestrator:
 
         except Exception as e:
             await self._schedule_limit_resume(update, context, None, e)
+            self._wake_if_timeout(update, context, e)
             from .handlers.common import _format_error_message
 
             self._active_requests.pop(user_id, None)
@@ -1469,6 +1534,7 @@ class MessageOrchestrator:
         formatted_messages = attach_header(formatted_messages, context, claude_response)
         self._wake_if_empty(update, context, claude_response)
         await self._schedule_limit_resume(update, context, claude_response)
+        self._wake_if_timeout(update, context, None)
 
         await self._close_progress(progress_msg)
 
